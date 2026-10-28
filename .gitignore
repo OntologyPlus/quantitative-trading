@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.quant-data/
+.runtime/
+artifacts/*.tgz
+.env*
+*.log
+.DS_Store

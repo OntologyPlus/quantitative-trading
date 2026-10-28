@@ -1,0 +1,101 @@
+{
+  "name": "@quant-assistant/harness-plugin",
+  "version": "0.1.0",
+  "description": "基于 DeepSeek Harness 的数字资产现货研究与模拟交易助手",
+  "type": "module",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.22.0",
+    "dsh": "0.2.1-rc.3"
+  },
+  "main": "./dist/host/index.js",
+  "exports": {
+    ".": "./dist/host/index.js",
+    "./tools": "./dist/host/tools.js",
+    "./rpc": "./dist/host/rpc.js",
+    "./client": "./dist/client.js"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "docs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  },
+  "scripts": {
+    "setup": "npm ci --ignore-scripts && npm run build",
+    "start": "node scripts/launch.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx tests/*.test.ts",
+    "build": "node scripts/build.mjs",
+    "check": "npm run typecheck && npm test && npm run build && node scripts/smoke.mjs",
+    "prepack": "npm run check",
+    "pack": "npm pack --pack-destination artifacts",
+    "check:launch": "node scripts/check-launch.mjs",
+    "check:market": "node scripts/check-market.mjs",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\" \"scripts/*.mjs\""
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.5",
+    "decimal.js": "10.6.0",
+    "zod": "4.6.6"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-sidebar-right": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-connection": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-sidebar-right": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-tool": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
+    "@types/node": "22.20.1",
+    "@types/react": "18.3.1",
+    "esbuild": "0.25.12",
+    "prettier": "3.6.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "zod": "4.6.6",
+    "undici": "8.12.2",
+    "@modelcontextprotocol/client": "2.3.0",
+    "fflate": "0.8.3"
+  }
+}

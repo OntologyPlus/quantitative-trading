@@ -1,0 +1,15 @@
+- insert:
+    - id: quant-service
+      name: "@quant-assistant/harness-plugin"
+    - id: quant-rpc
+      name: "@quant-assistant/harness-plugin/rpc"
+    - id: preset-quant
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: quant-research
+        name: 量化研究助手
+        description: 从交易假设到可核对的回测和现货模拟盘
+        order: 10
+        plugins:
+          - id: quant-tools
+            name: "@quant-assistant/harness-plugin/tools"
