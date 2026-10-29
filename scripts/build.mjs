@@ -29,6 +29,7 @@ await build({
     "src/host/index.ts",
     "src/host/tools.ts",
     "src/host/rpc.ts",
+    "src/host/agent.ts",
     "src/workers/backtest.ts",
   ],
   outdir: "dist",

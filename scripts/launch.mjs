@@ -29,6 +29,8 @@ writeFileSync(
         dataDirectory: ${q(join(root, ".quant-data"))}
     - id: quant-rpc
       name: ${q(join(root, "dist/host/rpc.js"))}
+    - id: quant-agent
+      name: ${q(join(root, "dist/host/agent.js"))}
     - id: preset-quant
       name: '@deepseek-ai/dsh-agent-preset'
       config:

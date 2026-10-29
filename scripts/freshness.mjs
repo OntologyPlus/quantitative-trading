@@ -36,6 +36,7 @@ export function needsBuild(root) {
       "host/index.js",
       "host/tools.js",
       "host/rpc.js",
+      "host/agent.js",
       "workers/backtest.js",
       "client.js",
       "build-state.json",

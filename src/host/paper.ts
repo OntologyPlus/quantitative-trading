@@ -9,7 +9,13 @@ import {
   intent,
   mark,
 } from "../engine/core.js";
-import { download, quote, symbols, validateBars } from "../adapters/market.js";
+import {
+  download,
+  quote,
+  symbols,
+  validateBars,
+  hash,
+} from "../adapters/market.js";
 import { barSchema, fail, id } from "../domain/schemas.js";
 import { ENGINE_VERSION } from "../engine/backtest.js";
 import { Research } from "./research.js";
@@ -83,6 +89,25 @@ export class Paper {
         fail("INVALID_STATE", "当前状态不能启动");
       const strategy = this.store.get<StrategyRecord>("strategy", a.strategyId),
         controller = new AbortController();
+      if (strategy.approvedConfigHash) {
+        const input = {
+          initialCash: a.config.initialCash,
+          risk: a.config.risk,
+          costs: a.config.costs,
+          from: 0,
+          to: 8640000000000000,
+        };
+        if (
+          hash(input) !== strategy.approvedConfigHash ||
+          hash(strategy.definition) !== strategy.definitionHash ||
+          a.approvalHash !==
+            hash({
+              strategy: strategy.definitionHash,
+              config: strategy.approvedConfigHash,
+            })
+        )
+          fail("APPROVAL_MISMATCH", "账户配置与用户确认的运行版本不一致");
+      }
       const list = await this.market.symbols(controller.signal),
         step = INTERVAL_MS[strategy.definition.interval],
         to = Math.floor(Date.now() / step) * step - step,

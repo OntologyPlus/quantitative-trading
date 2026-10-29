@@ -16,6 +16,9 @@ import {
 import { id } from "../domain/schemas.js";
 import { symbols } from "../adapters/market.js";
 import { POLICY } from "../domain/policy.js";
+import { fail } from "../domain/schemas.js";
+import type { ResearchProject } from "../domain/project.js";
+import { hash } from "../adapters/market.js";
 export const inject = ["tools", "systemPrompt", "quant"];
 const string = { type: "string", required: true } as const;
 const json = { type: "json", required: true } as const;
@@ -58,10 +61,80 @@ export function apply(ctx: Context) {
         isConcurrencySafe: () => !write,
         execute: async (args, exec) => {
           exec.signal.throwIfAborted();
+          const active = r.store
+            .list<ResearchProject>("project")
+            .find(
+              (p) =>
+                p.sourceSessionId === exec.agent?.session.id &&
+                p.authorization &&
+                !["completed", "cancelled", "failed"].includes(p.status),
+            );
+          if (
+            active &&
+            [
+              "qt_backtest_submit",
+              "qt_dataset_prepare",
+              "qt_strategy_draft",
+            ].includes(name)
+          )
+            fail(
+              "PROJECT_SCOPE",
+              "当前有研究委托，请通过项目动作推进，不能绕过项目预算提交独立实验",
+            );
           return { data: JSON.parse(JSON.stringify(await fn(args, exec))) };
         },
       }),
     );
+  register(
+    "qt_project_create",
+    "根据已讨论的目标提出研究草稿，input含name,objective,symbols,interval,from,to,budget等；不授权启动，用户在工作台核对",
+    { input: json },
+    (args, exec) =>
+      q.projects.create(
+        z.object({ input: z.unknown() }).strict().parse(args).input,
+        exec.agent!.session.id,
+        "ai",
+      ),
+    true,
+  );
+  register(
+    "qt_project_read",
+    "读取研究项目进度、实验、证据与报告；不传id返回分页项目摘要",
+    { id: { type: "string" } },
+    (args) => {
+      const x = z.object({ id: id.optional() }).strict().parse(args);
+      return x.id ? q.projects.read({ id: x.id }) : q.projects.list();
+    },
+  );
+  register(
+    "qt_project_action",
+    "下一步动作只能由受授权的专属研究执行会话提交；普通聊天请先提出研究委托",
+    { input: json },
+    () =>
+      fail(
+        "EXECUTION_SCOPE",
+        "请在工作台启动研究，后台执行会话会按委托提交动作",
+      ),
+    true,
+  );
+  register(
+    "qt_evidence_read",
+    "核对当前研究证据，需projectId和evidenceId",
+    { projectId: string, evidenceId: string },
+    (args) => {
+      const x = z
+        .object({ projectId: id, evidenceId: id })
+        .strict()
+        .parse(args);
+      return q.projects.readEvidence(x.projectId, x.evidenceId);
+    },
+  );
+  register(
+    "qt_monitor_read",
+    "读取模拟运行健康、异常通知与确定性事实复盘",
+    {},
+    () => q.monitor.list(),
+  );
   register(
     "qt_status",
     "每轮先读取研究状态、策略、数据、回测和模拟账户摘要",
@@ -90,7 +163,7 @@ export function apply(ctx: Context) {
       from: { type: "integer" },
       limit: { type: "integer" },
     },
-    (args) => {
+    (args, exec) => {
       const x = z
         .object({
           id: id.optional(),
@@ -101,11 +174,20 @@ export function apply(ctx: Context) {
         .parse(args);
       if (!x.id) return r.store.list("dataset");
       const dataset = r.store.get<Dataset>("dataset", x.id);
+      const active = r.store
+        .list<ResearchProject>("project")
+        .find(
+          (p) =>
+            p.sourceSessionId === exec.agent?.session.id &&
+            p.datasetIds.includes(dataset.id) &&
+            !p.holdoutRevealedAt,
+        );
       return {
         ...dataset,
         bars: r
           .bars(dataset)
           .filter((b) => b.time >= x.from)
+          .filter((b) => !active || b.time <= active.ranges.validation.to)
           .slice(0, x.limit),
       };
     },
@@ -173,14 +255,26 @@ export function apply(ctx: Context) {
       return {
         sameBasis: runs.every(
           (a) =>
-            JSON.stringify({ ...a.config, engineVersion: undefined }) ===
-              JSON.stringify({
+            hash({
+              config: {
+                ...a.config,
+                rules: Object.fromEntries(
+                  Object.entries(a.config.rules).sort(),
+                ),
+              },
+              datasets: [...a.datasetIds].sort(),
+            }) ===
+            hash({
+              config: {
                 ...runs[0]!.config,
-                engineVersion: undefined,
-              }) &&
-            JSON.stringify(a.datasetIds) ===
-              JSON.stringify(runs[0]!.datasetIds),
+                rules: Object.fromEntries(
+                  Object.entries(runs[0]!.config.rules).sort(),
+                ),
+              },
+              datasets: [...runs[0]!.datasetIds].sort(),
+            }),
         ),
+        engineVersions: [...new Set(runs.map((r) => r.config.engineVersion))],
         runs: runs.map((a) => ({
           id: a.id,
           manifestHash: a.manifestHash,

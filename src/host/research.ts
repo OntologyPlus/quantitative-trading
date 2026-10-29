@@ -55,18 +55,19 @@ export class Research {
   cancelBuffer: SharedArrayBuffer | null = null;
   private currentId = "";
   private dataAbort: AbortController | null = null;
+  private lastJobKind: "data" | "run" = "run";
   closed = false;
   constructor(directory: string) {
     this.directory = directory;
     mkdirSync(join(directory, "datasets"), { recursive: true });
     this.store = new Store(join(directory, "quant.sqlite"));
-    for (const r of this.store.list<RunRecord>("run"))
+    for (const r of this.store.withStatus<RunRecord>("run", ["running"]))
       if (r.status === "running") {
         r.status = "queued";
         r.progress = 0;
         this.store.put("run", r.id, r);
       }
-    for (const j of this.store.list<DataJob>("dataJob"))
+    for (const j of this.store.withStatus<DataJob>("dataJob", ["running"]))
       if (j.status === "running") {
         j.status = "queued";
         this.store.put("dataJob", j.id, j);
@@ -177,7 +178,7 @@ export class Research {
       const old = x.id
         ? this.store.get<StrategyRecord>("strategy", x.id)
         : null;
-      if (old?.published)
+      if (old?.published || old?.purpose === "research")
         fail("IMMUTABLE_VERSION", "已发布版本不可修改，请复制为新草稿");
       if ((old?.revision ?? 0) !== x.expectedRevision)
         fail("REVISION_CONFLICT", "策略版本已改变，请重新读取");
@@ -188,6 +189,7 @@ export class Research {
         definition: x.definition,
         published: false,
         author,
+        createdBy: old?.createdBy ?? author,
         createdAt: old?.createdAt ?? at(),
       };
       this.store.put("strategy", record.id, record);
@@ -205,11 +207,16 @@ export class Research {
       .parse(input);
     return this.store.submit(x.submissionId, "publish", x, () => {
       const record = this.store.get<StrategyRecord>("strategy", x.id);
+      if (record.purpose === "research")
+        fail("RESEARCH_ONLY", "研究版本不可直接发布，请从研究报告确认模拟配置");
       if (record.revision !== x.expectedRevision)
         fail("REVISION_CONFLICT", "策略版本已改变");
       if (record.published) fail("IMMUTABLE_VERSION", "该版本已经发布");
       record.published = true;
+      record.createdBy ??= record.author;
       record.author = "user";
+      record.approvedBy = "user";
+      record.approvedAt = at();
       record.revision++;
       this.store.put("strategy", record.id, record);
       return record;
@@ -220,7 +227,10 @@ export class Research {
     if (x.to <= x.from) fail("INVALID_RANGE", "结束时间必须晚于开始时间");
     return { ...x, rules, engineVersion: ENGINE_VERSION };
   }
-  submitRun(input: unknown) {
+  submitRun(
+    input: unknown,
+    grant?: { projectId: string; experimentId: string; maxComputeMs: number },
+  ) {
     const x = z
       .object({
         submissionId: id,
@@ -230,55 +240,69 @@ export class Research {
       })
       .strict()
       .parse(input);
-    const result = this.store.submit(x.submissionId, "backtest", x, () => {
-      if (
-        this.store
-          .list<RunRecord>("run")
-          .filter((r) => r.status === "queued" || r.status === "running")
-          .length >= 5
-      )
-        fail("QUEUE_LIMIT", "最多允许五个待完成回测，请先等待或取消任务");
-      const strategy = this.store.get<StrategyRecord>("strategy", x.strategyId);
-      if (!strategy.published) fail("NOT_PUBLISHED", "请先在工作台发布策略");
-      const datasets = x.datasetIds.map((d) =>
-        this.store.get<Dataset>("dataset", d),
-      );
-      if (
-        new Set(datasets.map((d) => d.symbol)).size !== datasets.length ||
-        datasets.length !== strategy.definition.symbols.length ||
-        datasets.some(
-          (d) =>
-            !strategy.definition.symbols.includes(d.symbol) ||
-            d.interval !== strategy.definition.interval,
+    const result = this.store.submit(
+      x.submissionId,
+      "backtest",
+      { input: x, grant: grant ?? null },
+      () => {
+        if (this.store.pendingCount("run") >= 5)
+          fail("QUEUE_LIMIT", "最多允许五个待完成回测，请先等待或取消任务");
+        const strategy = this.store.get<StrategyRecord>(
+          "strategy",
+          x.strategyId,
+        );
+        if (strategy.purpose === "research") {
+          if (!grant || grant.projectId !== strategy.projectId)
+            fail("RESEARCH_ONLY", "研究实验只能由对应委托调度");
+        } else if (!strategy.published)
+          fail("NOT_PUBLISHED", "请先在工作台发布策略");
+        const datasets = x.datasetIds.map((d) =>
+          this.store.get<Dataset>("dataset", d),
+        );
+        if (
+          new Set(datasets.map((d) => d.symbol)).size !== datasets.length ||
+          datasets.length !== strategy.definition.symbols.length ||
+          datasets.some(
+            (d) =>
+              !strategy.definition.symbols.includes(d.symbol) ||
+              d.interval !== strategy.definition.interval,
+          )
         )
-      )
-        fail("DATASET_MISMATCH", "每个策略交易对需要一份相同周期的数据");
-      if (datasets.reduce((n, d) => n + d.count, 0) > 1000000)
-        fail("TOO_LARGE", "单次任务最多一百万根 K 线");
-      const from = Math.max(x.config.from, ...datasets.map((d) => d.from)),
-        to = Math.min(x.config.to, ...datasets.map((d) => d.to));
-      if (to <= from) fail("INVALID_RANGE", "数据与请求区间没有共同覆盖");
-      const config = this.makeConfig(
-        { ...x.config, from, to },
-        Object.fromEntries(datasets.map((d) => [d.symbol, d.rules])),
-      );
-      const record: RunRecord = {
-        id: uid(),
-        strategyId: strategy.id,
-        datasetIds: x.datasetIds,
-        config,
-        status: "queued",
-        progress: 0,
-        createdAt: at(),
-        manifestHash: hash({
-          strategy: strategy.definition,
-          datasets: datasets.map((d) => d.hash),
+          fail("DATASET_MISMATCH", "每个策略交易对需要一份相同周期的数据");
+        if (datasets.reduce((n, d) => n + d.count, 0) > 1000000)
+          fail("TOO_LARGE", "单次任务最多一百万根 K 线");
+        const from = Math.max(x.config.from, ...datasets.map((d) => d.from)),
+          to = Math.min(x.config.to, ...datasets.map((d) => d.to));
+        if (to <= from) fail("INVALID_RANGE", "数据与请求区间没有共同覆盖");
+        const config = this.makeConfig(
+          { ...x.config, from, to },
+          Object.fromEntries(datasets.map((d) => [d.symbol, d.rules])),
+        );
+        const record: RunRecord = {
+          id: uid(),
+          strategyId: strategy.id,
+          datasetIds: x.datasetIds,
           config,
-        }),
-      };
-      this.store.put("run", record.id, record);
-      return record;
-    });
+          status: "queued",
+          progress: 0,
+          createdAt: at(),
+          manifestHash: hash({
+            strategy: strategy.definition,
+            datasets: datasets.map((d) => d.hash),
+            config,
+          }),
+          ...(grant
+            ? {
+                projectId: grant.projectId,
+                experimentId: grant.experimentId,
+                maxComputeMs: grant.maxComputeMs,
+              }
+            : {}),
+        };
+        this.store.put("run", record.id, record);
+        return record;
+      },
+    );
     setImmediate(() => void this.pump());
     return result;
   }
@@ -300,12 +324,7 @@ export class Research {
     )
       fail("INVALID_RANGE", "时间区间无效、起点未对齐或超过一百万根");
     const result = this.store.submit(x.submissionId, "prepare", x, () => {
-      if (
-        this.store
-          .list<DataJob>("dataJob")
-          .filter((j) => j.status === "queued" || j.status === "running")
-          .length >= 5
-      )
+      if (this.store.pendingCount("dataJob") >= 5)
         fail("QUEUE_LIMIT", "最多允许五个待完成下载，请先等待或取消任务");
       const job: DataJob = {
         id: uid(),
@@ -324,11 +343,12 @@ export class Research {
   }
   async pump() {
     if (this.closed || this.currentId) return;
-    const data = this.store
-      .list<DataJob>("dataJob")
-      .reverse()
-      .find((j) => j.status === "queued");
-    if (data) {
+    if (!this.ensureWriter()) return;
+    const data = this.store.withStatus<DataJob>("dataJob", ["queued"], 1)[0];
+    const queuedRun =
+      this.store.withStatus<RunRecord>("run", ["queued"], 1).length > 0;
+    if (data && (this.lastJobKind !== "data" || !queuedRun)) {
+      this.lastJobKind = "data";
       this.currentId = data.id;
       this.dataAbort = new AbortController();
       data.status = "running";
@@ -344,7 +364,11 @@ export class Research {
           data.to,
           this.dataAbort.signal,
           (n) => {
-            if (!this.closed && data.status === "running") {
+            if (
+              !this.closed &&
+              data.status === "running" &&
+              this.ensureWriter()
+            ) {
               data.progress = n;
               this.store.put("dataJob", data.id, data);
             }
@@ -381,18 +405,17 @@ export class Research {
           data.error = e instanceof Error ? e.message : String(e);
         }
       } finally {
-        if (!this.closed) this.store.put("dataJob", data.id, data);
+        if (!this.closed && this.ensureWriter())
+          this.store.put("dataJob", data.id, data);
         this.currentId = "";
         this.dataAbort = null;
         setImmediate(() => void this.pump());
       }
       return;
     }
-    const run = this.store
-      .list<RunRecord>("run")
-      .reverse()
-      .find((r) => r.status === "queued");
+    const run = this.store.withStatus<RunRecord>("run", ["queued"], 1)[0];
     if (!run) return;
+    this.lastJobKind = "run";
     this.currentId = run.id;
     run.status = "running";
     this.store.put("run", run.id, run);
@@ -419,27 +442,32 @@ export class Research {
       );
       this.worker = worker;
       let finished = false;
-      const timer = setTimeout(() => {
-        if (!finished) {
-          run.status = "failed";
-          run.error = "任务超过五分钟预算";
-          void worker.terminate();
-        }
-      }, 300000);
+      const startedAt = Date.now();
+      const timer = setTimeout(
+        () => {
+          if (!finished) {
+            run.status = "failed";
+            run.error = "任务超过计算时长预算";
+            void worker.terminate();
+          }
+        },
+        Math.min(300000, run.maxComputeMs ?? 300000),
+      );
       const finish = () => {
         if (finished) return;
         finished = true;
+        run.computeMs = Date.now() - startedAt;
         clearTimeout(timer);
         this.worker = null;
         this.cancelBuffer = null;
         this.currentId = "";
-        if (!this.closed) {
+        if (!this.closed && this.ensureWriter()) {
           this.store.put("run", run.id, run);
           setImmediate(() => void this.pump());
         }
       };
       worker.on("message", (message) => {
-        if (this.closed) return;
+        if (this.closed || !this.ensureWriter()) return;
         if (this.store.get<RunRecord>("run", run.id).status === "cancelled") {
           run.status = "cancelled";
           return;
@@ -512,6 +540,13 @@ export class Research {
       .parse(input);
     return this.store.submit(x.submissionId, "account", x, () => {
       const strategy = this.store.get<StrategyRecord>("strategy", x.strategyId);
+      if (strategy.purpose === "research")
+        fail("RESEARCH_ONLY", "研究版本不能绑定模拟账户，请从报告确认运行配置");
+      if (
+        strategy.approvedConfigHash &&
+        strategy.approvedConfigHash !== hash(x.config)
+      )
+        fail("APPROVAL_MISMATCH", "运行配置与已确认的研究配置不一致");
       if (!strategy.published) fail("NOT_PUBLISHED", "请先发布策略");
       const config = this.makeConfig(
           { ...x.config, from: 0, to: 8640000000000000 },
@@ -532,6 +567,14 @@ export class Research {
           error: "",
           generation: 0,
           createdAt: at(),
+          ...(strategy.approvedConfigHash
+            ? {
+                approvalHash: hash({
+                  strategy: strategy.definitionHash,
+                  config: strategy.approvedConfigHash,
+                }),
+              }
+            : {}),
         };
       this.store.put("account", account.id, account);
       return account;
@@ -570,5 +613,16 @@ export class Research {
     this.dataAbort?.abort();
     await this.worker?.terminate();
     this.store.close();
+  }
+  private ensureWriter() {
+    try {
+      this.store.assertLease();
+      return true;
+    } catch {
+      this.closed = true;
+      this.dataAbort?.abort();
+      void this.worker?.terminate();
+      return false;
+    }
   }
 }

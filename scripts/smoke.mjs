@@ -49,7 +49,7 @@ client.apply({
     },
   },
 });
-assert.equal(views.size, 13);
+assert.equal(views.size, Object.keys(client.TOOL_TITLES).length + 1);
 assert.equal(tabs[0].kind, "quant-workbench");
 const view = views.get("@quant-assistant/harness-plugin/workbench")({
   sessionId: "s",
@@ -110,6 +110,42 @@ try {
   assert.ok(result.result.hash);
   console.log(
     `Bundled plugin, client slots/disposal and real background worker: PASS (${result.result.state.fills.length} fills)`,
+  );
+  const project = q.projects.create(
+    {
+      submissionId: "project",
+      name: "自主研究闭环",
+      objective: "比较均线和突破并核对最终区间及成本压力",
+      symbols: [d.symbol],
+      interval: d.interval,
+      from: d.from,
+      to: d.to,
+      datasetIds: [d.id],
+      mode: "protocol",
+    },
+    "smoke-session",
+  );
+  q.projects.control({
+    submissionId: "start-project",
+    id: project.id,
+    expectedRevision: project.revision,
+    action: "start",
+  });
+  const projectDeadline = Date.now() + 30000;
+  let delivery;
+  while (Date.now() < projectDeadline) {
+    delivery = q.projects.read({ id: project.id }).project;
+    if (["completed", "failed", "waiting_input"].includes(delivery.status))
+      break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.equal(delivery.status, "completed", delivery.error || delivery.reason);
+  assert.equal(delivery.experiments.length, 6);
+  assert.equal(delivery.report.facts.length, 48);
+  assert.equal(delivery.report.conclusion, "inconclusive");
+  assert.ok(delivery.selectionHash);
+  console.log(
+    "Durable project, six real worker experiments, frozen selection and 48 verified evidence references: PASS",
   );
 } finally {
   await service.dispose();

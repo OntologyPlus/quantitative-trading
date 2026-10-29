@@ -3,6 +3,8 @@
       name: "@quant-assistant/harness-plugin"
     - id: quant-rpc
       name: "@quant-assistant/harness-plugin/rpc"
+    - id: quant-agent
+      name: "@quant-assistant/harness-plugin/agent"
     - id: preset-quant
       name: "@deepseek-ai/dsh-agent-preset"
       config:

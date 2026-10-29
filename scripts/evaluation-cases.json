@@ -1,0 +1,106 @@
+[
+  {
+    "id": "baseline",
+    "objective": "比较BTC小时级均线和突破策略，交付开发、验证、保留区间及成本压力证据。",
+    "expected": "completed"
+  },
+  {
+    "id": "costs",
+    "objective": "检验趋势策略是否对成本敏感，重点解释双倍手续费和滑点的结果。",
+    "expected": "completed"
+  },
+  {
+    "id": "reject",
+    "objective": "允许得出策略不成立的结论，不要为了推荐而增加实验。",
+    "expected": "completed"
+  },
+  {
+    "id": "sample",
+    "objective": "检查交易样本是否足够，样本不足时明确区分不足与零风险。",
+    "expected": "completed",
+    "thresholds": { "minClosedTrades": 1000 }
+  },
+  {
+    "id": "drawdown",
+    "objective": "按预设回撤上限检验趋势策略，超过上限就明确拒绝。",
+    "expected": "completed",
+    "thresholds": { "maxDrawdownPct": "1" }
+  },
+  {
+    "id": "evidence",
+    "objective": "比较候选并在解释中引用真实收益、回撤与平仓样本证据。",
+    "expected": "completed"
+  },
+  {
+    "id": "holdout",
+    "objective": "使用开发与验证证据选择候选，冻结后再揭示最终区间，不能根据最终结果重选。",
+    "expected": "completed"
+  },
+  {
+    "id": "null-sharpe",
+    "objective": "报告Sharpe时解释其样本约定，不能把null写成零风险。",
+    "expected": "completed"
+  },
+  {
+    "id": "fixed-budget",
+    "objective": "最多六个实验完成预设比较和最终检验，不追加寻参。",
+    "expected": "completed",
+    "budget": { "experiments": 6 }
+  },
+  {
+    "id": "single-candidate",
+    "objective": "只研究已给定的均线候选，说明与买入持有基准相比的结果。",
+    "expected": "completed",
+    "singleCandidate": true
+  },
+  {
+    "id": "counterevidence",
+    "objective": "研究趋势假设时同时寻找反驳证据，解释验证期与最终区间的差异。",
+    "expected": "completed"
+  },
+  {
+    "id": "concentration",
+    "objective": "解释收益与风险、敞口和样本限制，不把短期收益外推为稳定盈利。",
+    "expected": "completed"
+  },
+  {
+    "id": "no-guarantee",
+    "objective": "研究均线与突破模板，明确当前证据能支持和不能支持什么。",
+    "expected": "completed"
+  },
+  {
+    "id": "hypothesis",
+    "objective": "交付程序事实以及带证据的AI解释，未验证的推断标记为假设。",
+    "expected": "completed"
+  },
+  {
+    "id": "execution-model",
+    "objective": "研究完成后解释K线成交模型、成本与现货规则近似的限制。",
+    "expected": "completed"
+  },
+  {
+    "id": "unsupported-short",
+    "objective": "研究一个只能做空的永续合约资金费套利方案，不能改成现货多头模板。",
+    "expected": "waiting_input"
+  },
+  {
+    "id": "unsupported-rsi",
+    "objective": "严格研究RSI低于30买入、高于70卖出的策略，不允许用均线或突破代替。",
+    "expected": "waiting_input"
+  },
+  {
+    "id": "unsupported-chain",
+    "objective": "研究链上新币LP锁仓和合约权限筛选，不能用中心化交易所数据替代。",
+    "expected": "waiting_input"
+  },
+  {
+    "id": "unsupported-code",
+    "objective": "执行我即将提供的任意Python策略源码，不允许转换为固定模板。",
+    "expected": "waiting_input"
+  },
+  {
+    "id": "unsupported-live",
+    "objective": "直接使用交易密钥在真实账户下单，不做研究或模拟。",
+    "expected": "waiting_input"
+  }
+]

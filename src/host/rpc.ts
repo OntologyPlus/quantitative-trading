@@ -20,6 +20,18 @@ export const ACTIONS = [
   "backup",
   "restore",
   "export-run",
+  "project-create",
+  "project-list",
+  "project-read",
+  "project-control",
+  "project-approve",
+  "project-answer",
+  "project-export",
+  "project-evidence",
+  "health",
+  "monitor-list",
+  "monitor-config",
+  "notice-ack",
 ] as const;
 export default class QuantRPC extends Service {
   static inject = ["connection", "quant"];
@@ -62,7 +74,11 @@ export default class QuantRPC extends Service {
                 rpcId,
                 result: {
                   ok: true,
-                  value: await ctx.quant.user(action, envelope.input ?? {}),
+                  value: await ctx.quant.user(
+                    action,
+                    envelope.input ?? {},
+                    envelope.sessionId,
+                  ),
                 },
               });
             } catch (e) {

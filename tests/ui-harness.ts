@@ -103,7 +103,11 @@ export function mount(
     setInterval: () => 1,
     clearInterval() {},
     document: { getElementById: () => null },
-    window: { getSelection: () => null },
+    window: {
+      getSelection: () => null,
+      addEventListener() {},
+      removeEventListener() {},
+    },
     localStorage: {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value),

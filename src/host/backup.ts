@@ -20,14 +20,35 @@ import { ENGINE_VERSION } from "../engine/backtest.js";
 import { Research } from "./research.js";
 import { writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import type { ResearchProject } from "../domain/project.js";
+import { validateProjects, validateDispatches } from "../research/backup.js";
+import type { MonitorRecord, Notice, SimulationReview } from "./monitor.js";
 const MAX = 64 * 1024 * 1024;
 export function exportBackup(r: Research) {
   if (
     r.store.list<Account>("account").some((a) => a.status === "running") ||
-    r.worker
+    r.worker ||
+    r.store
+      .list<ResearchProject>("project")
+      .some((p) =>
+        ["ready", "running", "waiting_job", "waiting_agent"].includes(p.status),
+      )
   )
     fail("STOP_FIRST", "请先暂停模拟盘并等待回测结束再备份");
-  const kinds = ["dataset", "strategy", "run", "account", "review", "dataJob"];
+  const kinds = [
+    "dataset",
+    "strategy",
+    "run",
+    "account",
+    "review",
+    "dataJob",
+    "project",
+    "dispatch",
+    "approval",
+    "monitor",
+    "notice",
+    "simulationReview",
+  ];
   const objects = Object.fromEntries(
       kinds.map((k) => [k, r.store.list<any>(k)]),
     ),
@@ -35,12 +56,17 @@ export function exportBackup(r: Research) {
       (objects.dataset as Dataset[]).map((d) => [d.id, r.bars(d)]),
     );
   const body = {
-    format: "quant-assistant-v1",
-    schemaVersion: 1,
+    format: "quant-assistant-v2",
+    schemaVersion: 2,
     engineVersion: ENGINE_VERSION,
     createdAt: new Date().toISOString(),
     objects,
     data,
+    events: r.store.db
+      .prepare(
+        "SELECT project_id,revision,type,body,at FROM project_events ORDER BY sequence",
+      )
+      .all(),
   };
   const result = { ...body, hash: hash(body) };
   if (Buffer.byteLength(JSON.stringify(result)) > MAX)
@@ -56,9 +82,9 @@ export function restoreBackup(r: Research, input: unknown) {
     fail("TOO_LARGE", "备份超过 64 MB");
   const b = z
     .object({
-      format: z.literal("quant-assistant-v1"),
-      schemaVersion: z.literal(1),
-      engineVersion: z.literal(ENGINE_VERSION),
+      format: z.enum(["quant-assistant-v1", "quant-assistant-v2"]),
+      schemaVersion: z.union([z.literal(1), z.literal(2)]),
+      engineVersion: z.string().min(1),
       createdAt: z.string(),
       objects: z
         .object({
@@ -68,9 +94,28 @@ export function restoreBackup(r: Research, input: unknown) {
           account: z.array(z.unknown()),
           review: z.array(z.unknown()),
           dataJob: z.array(z.unknown()),
+          project: z.array(z.unknown()).optional(),
+          dispatch: z.array(z.unknown()).optional(),
+          approval: z.array(z.unknown()).optional(),
+          monitor: z.array(z.unknown()).optional(),
+          notice: z.array(z.unknown()).optional(),
+          simulationReview: z.array(z.unknown()).optional(),
         })
         .strict(),
       data: z.record(id, z.unknown()),
+      events: z
+        .array(
+          z
+            .object({
+              project_id: id,
+              revision: z.number().int(),
+              type: z.string().max(100),
+              body: z.string(),
+              at: z.string(),
+            })
+            .strict(),
+        )
+        .optional(),
       hash: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .strict()
@@ -117,6 +162,13 @@ export function restoreBackup(r: Research, input: unknown) {
           published: z.boolean(),
           author: z.enum(["user", "ai"]),
           createdAt: z.string(),
+          purpose: z.literal("research").optional(),
+          projectId: id.optional(),
+          definitionHash: z.string().optional(),
+          createdBy: z.enum(["user", "ai"]).optional(),
+          approvedBy: z.literal("user").optional(),
+          approvedAt: z.string().optional(),
+          approvedConfigHash: z.string().optional(),
         })
         .strict()
         .parse(v) as StrategyRecord,
@@ -135,9 +187,24 @@ export function restoreBackup(r: Research, input: unknown) {
       if (ids.has(value.id)) fail("DUPLICATE_ID", "备份存在重复身份");
       ids.add(value.id);
     }
+  for (const kind of [
+    "project",
+    "dispatch",
+    "approval",
+    "monitor",
+    "notice",
+    "simulationReview",
+  ] as const) {
+    const withinKind = new Set<string>();
+    for (const v of b.objects[kind] ?? []) {
+      const value = z.object({ id }).passthrough().parse(v);
+      if (withinKind.has(value.id)) fail("DUPLICATE_ID", "备份存在重复身份");
+      withinKind.add(value.id);
+    }
+  }
   const configSchema = configInput.extend({
     rules: z.record(z.string(), rulesSchema),
-    engineVersion: z.literal(ENGINE_VERSION),
+    engineVersion: z.string().min(1),
   });
   const accounts = b.objects.account.map(
     (v) =>
@@ -157,6 +224,7 @@ export function restoreBackup(r: Research, input: unknown) {
           error: z.string(),
           generation: z.number().int(),
           createdAt: z.string(),
+          approvalHash: z.string().optional(),
         })
         .strict()
         .parse(v) as Account,
@@ -194,6 +262,10 @@ export function restoreBackup(r: Research, input: unknown) {
           error: z.string().optional(),
           result: z.unknown().optional(),
           manifestHash: z.string(),
+          projectId: id.optional(),
+          experimentId: id.optional(),
+          computeMs: z.number().nonnegative().optional(),
+          maxComputeMs: z.number().positive().optional(),
         })
         .strict()
         .parse(v) as RunRecord,
@@ -293,6 +365,100 @@ export function restoreBackup(r: Research, input: unknown) {
       job.error = "备份恢复不自动执行任务";
     }
   }
+  const projects = validateProjects(
+    b.objects.project ?? [],
+    runs,
+    datasets,
+    strategies,
+  );
+  const dispatches = validateDispatches(b.objects.dispatch ?? [], projects);
+  const approvals = (b.objects.approval ?? []).map((v) =>
+    z
+      .object({
+        id,
+        projectId: id,
+        strategyId: id,
+        definitionHash: z.string(),
+        configHash: z.string(),
+        reportHash: z.string(),
+        actor: z.literal("user"),
+        at: z.string(),
+      })
+      .strict()
+      .parse(v),
+  );
+  for (const a of approvals)
+    if (
+      !projects.some(
+        (p) => p.id === a.projectId && p.report?.hash === a.reportHash,
+      ) ||
+      !accounts.some((v) => v.id === a.id && v.strategyId === a.strategyId)
+    )
+      fail("BROKEN_REFERENCE", "模拟授权引用无效");
+  const monitors = (b.objects.monitor ?? []).map(
+    (v) =>
+      z
+        .object({
+          id,
+          enabled: z.boolean(),
+          reviewHours: z.number().int().min(1).max(168),
+          nextReviewAt: z.number().nonnegative(),
+          activeFault: z.string(),
+          lastCheckedAt: z.number().nonnegative(),
+          lastAccountStatus: z.string(),
+        })
+        .strict()
+        .parse(v) as MonitorRecord,
+  );
+  const notices = (b.objects.notice ?? []).map(
+    (v) =>
+      z
+        .object({
+          id,
+          accountId: id,
+          kind: z.enum(["fault", "recovered", "review"]),
+          message: z.string(),
+          at: z.string(),
+          resolvedAt: z.string().nullable(),
+          acknowledged: z.boolean(),
+        })
+        .strict()
+        .parse(v) as Notice,
+  );
+  const simulationReviews = (b.objects.simulationReview ?? []).map(
+    (v) =>
+      z
+        .object({
+          id,
+          accountId: id,
+          at: z.string(),
+          from: z.number().nonnegative(),
+          to: z.number().nonnegative(),
+          metrics: z.record(
+            z.string(),
+            z.union([z.string(), z.number(), z.null()]),
+          ),
+          observationGap: z.boolean(),
+          status: z.string(),
+          reason: z.string(),
+          kind: z.literal("deterministic"),
+        })
+        .strict()
+        .parse(v) as unknown as SimulationReview,
+  );
+  for (const m of monitors) {
+    if (!accounts.some((a) => a.id === m.id))
+      fail("BROKEN_REFERENCE", "运行监测账户引用无效");
+    m.enabled = false;
+  }
+  for (const v of [...notices, ...simulationReviews])
+    if (!accounts.some((a) => a.id === v.accountId))
+      fail("BROKEN_REFERENCE", "运行观察引用无效");
+  for (const e of b.events ?? []) {
+    if (!projects.some((p) => p.id === e.project_id))
+      fail("BROKEN_REFERENCE", "研究事件引用无效");
+    JSON.parse(e.body);
+  }
   // Validate everything before any DB mutation. Ready files are content-addressed.
   for (const d of datasets) {
     const bars = validateBars(b.data[d.id], d.symbol, d.interval),
@@ -327,6 +493,18 @@ export function restoreBackup(r: Research, input: unknown) {
       };
       r.store.put("review", review.id, review);
     }
+    for (const p of projects) r.store.put("project", p.id, p);
+    for (const d of dispatches) r.store.put("dispatch", d.id, d);
+    for (const a of approvals) r.store.put("approval", a.id, a);
+    for (const m of monitors) r.store.put("monitor", m.id, m);
+    for (const n of notices) r.store.put("notice", n.id, n);
+    for (const v of simulationReviews) r.store.put("simulationReview", v.id, v);
+    for (const e of b.events ?? [])
+      r.store.db
+        .prepare(
+          "INSERT INTO project_events(project_id,revision,type,body,at) VALUES (?,?,?,?,?)",
+        )
+        .run(e.project_id, e.revision, e.type, e.body, e.at);
     return {
       restored: true,
       datasets: datasets.length,
@@ -334,6 +512,7 @@ export function restoreBackup(r: Research, input: unknown) {
       runs: runs.length,
       accounts: accounts.length,
       dataJobs: dataJobs.length,
+      projects: projects.length,
     };
   });
 }

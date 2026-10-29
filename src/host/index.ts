@@ -14,6 +14,11 @@ import type {
   StrategyRecord,
 } from "../domain/contracts.js";
 import { metrics } from "../engine/core.js";
+import { ProjectService } from "../agent/project-service.js";
+import type { ResearchProject } from "../domain/project.js";
+import { existsSync } from "node:fs";
+import { ENGINE_VERSION } from "../engine/backtest.js";
+import { MonitorService } from "./monitor.js";
 export interface Config {
   dataDirectory: string;
 }
@@ -29,6 +34,8 @@ export default class QuantService extends Service {
   static Config = Config;
   readonly research: Research;
   readonly paper: Paper;
+  readonly projects: ProjectService;
+  readonly monitor: MonitorService;
   constructor(ctx: Context, config: Config) {
     super(ctx, "quant");
     const directory =
@@ -37,7 +44,11 @@ export default class QuantService extends Service {
     if (!isAbsolute(directory)) throw Error("数据目录必须是绝对路径");
     this.research = new Research(directory);
     this.paper = new Paper(this.research);
+    this.projects = new ProjectService(this.research);
+    this.monitor = new MonitorService(this.research);
     ctx.effect(() => async () => {
+      this.monitor.close();
+      await this.projects.close();
       this.paper.close();
       await this.research.close();
     });
@@ -48,19 +59,25 @@ export default class QuantService extends Service {
     return {
       schemaVersion: 1,
       mode: "research-paper-only",
-      datasets: s.list<Dataset>("dataset"),
-      strategies: s.list<StrategyRecord>("strategy"),
-      runs: s.list<RunRecord>("run").map(({ result, ...run }) => ({
-        ...run,
-        metrics: result?.metrics,
-        benchmarks: result?.benchmarks,
-      })),
-      dataJobs: s.list("dataJob"),
+      datasets: s.page<Dataset>("dataset", 0, 100),
+      strategies: s
+        .page<StrategyRecord>("strategy", 0, 100)
+        .filter((v) => v.purpose !== "research"),
+      runs: s
+        .page<RunRecord>("run", 0, 100)
+        .filter((v) => !v.projectId)
+        .map(({ result, ...run }) => ({
+          ...run,
+          metrics: result?.metrics,
+          benchmarks: result?.benchmarks,
+        })),
+      dataJobs: s.page("dataJob", 0, 100),
       accounts: s.list<Account>("account").map((a) => ({
         ...this.paper.summary(a),
         metrics: metrics(a.state, a.config),
       })),
-      reviews: s.list("review"),
+      reviews: s.page("review", 0, 100),
+      projects: this.projects.list({ limit: 5 }).projects,
       capabilities: {
         liveTrading: false,
         syntheticData: true,
@@ -128,9 +145,62 @@ export default class QuantService extends Service {
       offset: x.offset,
     };
   }
-  async user(action: string, input: unknown): Promise<unknown> {
+  async user(
+    action: string,
+    input: unknown,
+    sessionId = "local-user",
+  ): Promise<unknown> {
     const r = this.research;
     switch (action) {
+      case "project-create":
+        return this.projects.create(input, sessionId);
+      case "project-list":
+        return this.projects.list(input);
+      case "project-read":
+        return this.projects.read(input);
+      case "project-control":
+        return this.projects.control(input);
+      case "project-approve":
+        return this.projects.approve(input);
+      case "project-answer":
+        return this.projects.answer(input);
+      case "monitor-list":
+        return this.monitor.list(input);
+      case "monitor-config":
+        return this.monitor.config(input);
+      case "notice-ack":
+        return this.monitor.acknowledge(input);
+      case "project-export": {
+        const x = z.object({ id }).strict().parse(input),
+          p = this.projects.verifyReport(x.id);
+        if (!p.report) throw Error("研究尚未形成报告");
+        return {
+          project: p,
+          report: p.report,
+          events: r.store.events(p.id, 0, 10000),
+        };
+      }
+      case "project-evidence": {
+        const x = z.object({ id, evidenceId: id }).strict().parse(input);
+        return this.projects.readEvidence(x.id, x.evidenceId);
+      }
+      case "health":
+        return {
+          asOf: new Date().toISOString(),
+          node: process.version,
+          engine: ENGINE_VERSION,
+          uptimeSeconds: Math.floor(process.uptime()),
+          rssMiB: Math.round(process.memoryUsage().rss / 1048576),
+          heapMiB: Math.round(process.memoryUsage().heapUsed / 1048576),
+          ...this.projects.health(),
+          worker: existsSync(
+            new URL("../workers/backtest.js", import.meta.url),
+          ),
+          agent: this.projects.agentAvailable(),
+          mode: "local-process",
+          capabilities: ["research", "paper"],
+          liveTrading: false,
+        };
       case "snapshot":
         return this.snapshot();
       case "demo":

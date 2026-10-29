@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import {
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { hash } from "../adapters/market.js";
 import { fail } from "../domain/schemas.js";
 import type { EngineState } from "../domain/contracts.js";
@@ -9,8 +15,13 @@ export class Store {
   readonly db: DatabaseSync;
   private readonly owner = randomUUID();
   private heartbeat: ReturnType<typeof setInterval>;
+  private depth = 0;
+  private listeners = new Set<() => void>();
+  private resultDirectory: string;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
+    this.resultDirectory = join(dirname(path), "results");
+    mkdirSync(this.resultDirectory, { recursive: true });
     this.db = new DatabaseSync(path);
     this.db
       .exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
@@ -30,7 +41,7 @@ export class Store {
           value: string;
         }
       | undefined;
-    if (v && v.value !== "1")
+    if (v && !["1", "2"].includes(v.value))
       fail("SCHEMA_VERSION", "数据库版本不支持，请保留原目录");
     this.db
       .prepare("INSERT OR IGNORE INTO metadata VALUES (?,?)")
@@ -58,6 +69,22 @@ export class Store {
       this.db.close();
       throw e;
     }
+    // Acquire the writer lease before migrating. Keep a coherent SQLite backup,
+    // including WAL contents, rather than copying the main database file.
+    if (v?.value === "1" && !existsSync(`${path}.schema1.bak`))
+      this.db.prepare("VACUUM INTO ?").run(`${path}.schema1.bak`);
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS project_events(
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL,
+          revision INTEGER NOT NULL, type TEXT NOT NULL, body TEXT NOT NULL, at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS project_events_project ON project_events(project_id,sequence);
+        CREATE TABLE IF NOT EXISTS consumers(name TEXT PRIMARY KEY,cursor INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS objects_kind ON objects(kind);
+        CREATE INDEX IF NOT EXISTS objects_status ON objects(kind,json_extract(body,'$.status'));
+      `);
+      this.db.prepare("UPDATE metadata SET value='2' WHERE key='schema'").run();
+    });
     this.heartbeat = setInterval(() => {
       try {
         this.db
@@ -78,7 +105,7 @@ export class Store {
         }
       | undefined;
     return row
-      ? (JSON.parse(row.body) as T)
+      ? (this.hydrate(kind, JSON.parse(row.body)) as T)
       : fail("NOT_FOUND", "找不到指定对象");
   }
   maybe<T>(kind: string, id: string): T | null {
@@ -95,7 +122,58 @@ export class Store {
         .all(kind) as {
         body: string;
       }[]
-    ).map((x) => JSON.parse(x.body) as T);
+    ).map((x) => this.hydrate(kind, JSON.parse(x.body)) as T);
+  }
+  private hydrate(kind: string, value: any) {
+    if (kind !== "run" || !value.resultArtifact) return value;
+    if (!/^[a-f0-9]{64}$/.test(value.resultArtifact))
+      fail("INVALID_ARTIFACT", "回测产物身份无效");
+    const text = readFileSync(
+      join(this.resultDirectory, `${value.resultArtifact}.json`),
+      "utf8",
+    );
+    if (hash(text) !== value.resultArtifact)
+      fail("ARTIFACT_HASH", "回测产物完整性校验失败");
+    const { resultArtifact, ...record } = value;
+    return { ...record, result: JSON.parse(text) };
+  }
+  private serialize(kind: string, value: unknown) {
+    const record = value as any;
+    if (kind !== "run" || !record.result?.state) return JSON.stringify(value);
+    const text = JSON.stringify(record.result),
+      digest = hash(text),
+      path = join(this.resultDirectory, `${digest}.json`);
+    if (!existsSync(path)) {
+      const temp = join(this.resultDirectory, `${randomUUID()}.tmp`);
+      writeFileSync(temp, text, { flag: "wx" });
+      renameSync(temp, path);
+    }
+    const { state, ...summary } = record.result;
+    return JSON.stringify({
+      ...record,
+      result: summary,
+      resultArtifact: digest,
+    });
+  }
+  withStatus<T>(kind: string, statuses: string[], limit = 1000): T[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT body FROM objects WHERE kind=? AND json_extract(body,'$.status') IN (${statuses.map(() => "?").join(",")}) ORDER BY rowid LIMIT ?`,
+        )
+        .all(kind, ...statuses, limit) as { body: string }[]
+    ).map((r) => this.hydrate(kind, JSON.parse(r.body)) as T);
+  }
+  pendingCount(kind: string) {
+    return Number(
+      (
+        this.db
+          .prepare(
+            "SELECT count(*) AS n FROM objects WHERE kind=? AND json_extract(body,'$.status') IN ('queued','running')",
+          )
+          .get(kind) as { n: number }
+      ).n,
+    );
   }
   assertLease() {
     const row = this.db
@@ -109,28 +187,131 @@ export class Store {
     if (!row || row.owner !== this.owner || row.expires <= Date.now())
       fail("LEASE_LOST", "数据目录执行租约已失效，请重启应用");
   }
-  put(kind: string, id: string, value: unknown) {
+  put(kind: string, id: string, value: unknown): void {
+    if (!this.depth) return this.transaction(() => this.put(kind, id, value));
     this.assertLease();
     this.db
       .prepare(
         "INSERT INTO objects VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body",
       )
-      .run(kind, id, JSON.stringify(value));
+      .run(kind, id, this.serialize(kind, value));
     this.db
       .prepare("INSERT INTO outbox(kind,object_id,at) VALUES (?,?,?)")
       .run(kind, id, new Date().toISOString());
   }
   transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
+    const outer = this.depth === 0,
+      name = `quant_tx_${this.depth}`;
+    this.db.exec(outer ? "BEGIN IMMEDIATE" : `SAVEPOINT ${name}`);
+    this.depth++;
     try {
       this.assertLease();
       const value = fn();
-      this.db.exec("COMMIT");
+      this.db.exec(outer ? "COMMIT" : `RELEASE SAVEPOINT ${name}`);
+      if (outer) queueMicrotask(() => this.listeners.forEach((fn) => fn()));
       return value;
     } catch (e) {
-      this.db.exec("ROLLBACK");
+      this.db.exec(outer ? "ROLLBACK" : `ROLLBACK TO SAVEPOINT ${name}`);
+      if (!outer) this.db.exec(`RELEASE SAVEPOINT ${name}`);
       throw e;
+    } finally {
+      this.depth--;
     }
+  }
+  onChange(fn: () => void) {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+  page<T>(kind: string, offset = 0, limit = 50, strip: string[] = []): T[] {
+    // Paths are fixed by callers; user-supplied values never become SQL.
+    const body = strip.length
+      ? `json_remove(body,${strip.map(() => "?").join(",")})`
+      : "body";
+    return (
+      this.db
+        .prepare(
+          `SELECT ${body} AS body FROM objects WHERE kind=? ORDER BY rowid DESC LIMIT ? OFFSET ?`,
+        )
+        .all(...strip.map((p) => `$.${p}`), kind, limit, offset) as {
+        body: string;
+      }[]
+    ).map((row) => JSON.parse(row.body) as T);
+  }
+  count(kind: string) {
+    return Number(
+      (
+        this.db
+          .prepare("SELECT count(*) AS n FROM objects WHERE kind=?")
+          .get(kind) as { n: number }
+      ).n,
+    );
+  }
+  event(projectId: string, revision: number, type: string, facts: unknown) {
+    this.assertLease();
+    this.db
+      .prepare(
+        "INSERT INTO project_events(project_id,revision,type,body,at) VALUES (?,?,?,?,?)",
+      )
+      .run(
+        projectId,
+        revision,
+        type,
+        JSON.stringify(facts),
+        new Date().toISOString(),
+      );
+  }
+  events(projectId: string, after = 0, limit = 100) {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM project_events WHERE project_id=? AND sequence>? ORDER BY sequence LIMIT ?",
+        )
+        .all(projectId, after, limit) as {
+        sequence: number;
+        project_id: string;
+        revision: number;
+        type: string;
+        body: string;
+        at: string;
+      }[]
+    ).map(({ body, ...e }) => ({ ...e, facts: JSON.parse(body) as unknown }));
+  }
+  changes(after: number, limit = 200) {
+    return this.db
+      .prepare(
+        "SELECT sequence,kind,object_id FROM outbox WHERE sequence>? ORDER BY sequence LIMIT ?",
+      )
+      .all(after, limit) as {
+      sequence: number;
+      kind: string;
+      object_id: string;
+    }[];
+  }
+  cursor(name: string) {
+    return Number(
+      (
+        this.db
+          .prepare("SELECT cursor FROM consumers WHERE name=?")
+          .get(name) as { cursor: number } | undefined
+      )?.cursor ?? 0,
+    );
+  }
+  consume(name: string, cursor: number) {
+    this.assertLease();
+    this.db
+      .prepare(
+        "INSERT INTO consumers VALUES (?,?) ON CONFLICT(name) DO UPDATE SET cursor=excluded.cursor",
+      )
+      .run(name, cursor);
+    const low = (
+      this.db.prepare("SELECT min(cursor) AS n FROM consumers").get() as {
+        n: number;
+      }
+    ).n;
+    if (low > 1000)
+      this.db.prepare("DELETE FROM outbox WHERE sequence<?").run(low - 1000);
   }
   submit<T>(
     submissionId: string,
@@ -205,6 +386,7 @@ export class Store {
     }
   }
   close() {
+    this.listeners.clear();
     clearInterval(this.heartbeat);
     this.db.prepare("DELETE FROM lease WHERE owner=?").run(this.owner);
     this.db.close();

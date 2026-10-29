@@ -9,6 +9,7 @@ import { TOOL_TITLES } from "../domain/contracts.js";
 import { Studio, STUDIO_ID, STUDIO_KIND } from "./studio.js";
 import type { Caller } from "./api.js";
 import { styles } from "./styles.js";
+export { TOOL_TITLES };
 export const inject = [
   "slots",
   "connection",
@@ -17,10 +18,32 @@ export const inject = [
 ];
 function ToolCard(
   props: ToolCallViewProps & {
-    open: () => void;
+    open: (projectId?: string) => void;
   },
 ) {
   const done = props.phase === "result";
+  let summary: Record<string, unknown> | null = null;
+  if (done && !props.block.isError) {
+    for (const block of props.block.content ?? [])
+      if (block.type === "text") {
+        try {
+          const parsed = JSON.parse(block.text);
+          const data = parsed.data ?? parsed;
+          summary = (data.project ?? data) as Record<string, unknown>;
+        } catch {
+          /* Other tool text remains in the host transcript. */
+        }
+        if (summary) break;
+      }
+  }
+  const projectId =
+    summary &&
+    typeof summary.id === "string" &&
+    ["qt_project_create", "qt_project_read", "qt_project_action"].includes(
+      props.toolName,
+    )
+      ? summary.id
+      : undefined;
   return (
     <section className="qt">
       <style>{styles}</style>
@@ -34,7 +57,21 @@ function ToolCard(
               ? "这一步未完成，请查看错误后重试。"
               : "工具已返回；持续任务的完成状态请在工作台查看。"}
         </p>
-        <button onClick={props.open}>打开量化工作台 ↗</button>
+        {summary && (
+          <div className="review">
+            {typeof summary.name === "string" && (
+              <strong>{summary.name}</strong>
+            )}
+            {typeof summary.reason === "string" && <p>{summary.reason}</p>}
+            {typeof summary.status === "string" && (
+              <small>任务状态：{summary.status}</small>
+            )}
+            {typeof summary.manifestHash === "string" && (
+              <small className="mono">Manifest {summary.manifestHash}</small>
+            )}
+          </div>
+        )}
+        <button onClick={() => props.open(projectId)}>打开量化工作台 ↗</button>
       </div>
     </section>
   );
@@ -52,7 +89,13 @@ export function apply(ctx: Context) {
       ctx.slots.register({ name: "tool.call.toolview", key }, (props) => (
         <ToolCard
           {...props}
-          open={() => ctx.sidebarRight.openTab(STUDIO_KIND)}
+          open={(projectId) => {
+            ctx.sidebarRight.openTab(STUDIO_KIND);
+            if (projectId)
+              window.dispatchEvent(
+                new CustomEvent("quant-open-project", { detail: projectId }),
+              );
+          }}
         />
       )),
     );

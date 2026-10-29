@@ -184,6 +184,13 @@ export interface StrategyRecord {
   published: boolean;
   author: "user" | "ai";
   createdAt: string;
+  purpose?: "research";
+  projectId?: string;
+  definitionHash?: string;
+  createdBy?: "user" | "ai";
+  approvedBy?: "user";
+  approvedAt?: string;
+  approvedConfigHash?: string;
 }
 export interface RunRecord {
   id: string;
@@ -196,6 +203,10 @@ export interface RunRecord {
   error?: string;
   result?: RunResult;
   manifestHash: string;
+  projectId?: string;
+  experimentId?: string;
+  computeMs?: number;
+  maxComputeMs?: number;
 }
 export interface Account {
   id: string;
@@ -212,8 +223,14 @@ export interface Account {
   error: string;
   generation: number;
   createdAt: string;
+  approvalHash?: string;
 }
 export const TOOL_TITLES: Record<string, string> = {
+  qt_project_create: "提出研究委托",
+  qt_project_read: "研究项目",
+  qt_project_action: "研究下一步",
+  qt_evidence_read: "核对研究证据",
+  qt_monitor_read: "运行观察与复盘",
   qt_status: "研究状态",
   qt_symbols: "交易对目录",
   qt_dataset_inspect: "数据检查",

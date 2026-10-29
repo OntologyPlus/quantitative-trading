@@ -12,6 +12,8 @@ import type {
 import type { Caller } from "./api.js";
 import { call, download } from "./api.js";
 import { styles } from "./styles.js";
+import { ResearchWorkspace } from "./research.js";
+import { MonitoringPanel } from "./monitor.js";
 export const STUDIO_ID = "@quant-assistant/harness-plugin/workbench",
   STUDIO_KIND = "quant-workbench";
 type Tab = "overview" | "strategy" | "data" | "backtest" | "paper" | "logs";
@@ -188,8 +190,16 @@ export function Studio({
   const [cash, setCash] = useState("10000"),
     [risk, setRisk] = useState(defaultRisk),
     [costs, setCosts] = useState(defaultCosts),
-    [from, setFrom] = useState("2025-01-01T00:00"),
-    [to, setTo] = useState("2025-02-01T00:00"),
+    [from, setFrom] = useState(() =>
+      new Date(Math.floor(Date.now() / 3600000) * 3600000 - 90 * 86400000)
+        .toISOString()
+        .slice(0, 16),
+    ),
+    [to, setTo] = useState(() =>
+      new Date(Math.floor(Date.now() / 3600000) * 3600000 - 3600000)
+        .toISOString()
+        .slice(0, 16),
+    ),
     [rangeFrom, setRangeFrom] = useState(""),
     [rangeTo, setRangeTo] = useState(""),
     [dataSymbol, setDataSymbol] = useState("BTCUSDT"),
@@ -516,7 +526,7 @@ export function Studio({
       <nav className="tabs" role="tablist" aria-label="量化工作台">
         {(
           [
-            ["overview", "总览"],
+            ["overview", "研究委托"],
             ["strategy", "策略"],
             ["data", "数据"],
             ["backtest", "回测"],
@@ -557,145 +567,151 @@ export function Studio({
         {!snap && <p className="empty">正在连接量化服务…</p>}
         {snap && tab === "overview" && (
           <>
-            <div className="card">
-              <div className="card-title">
-                <h2>研究，从一个假设开始</h2>
-                <span className="badge">现货 · 只做多</span>
-              </div>
-              <p className="muted">
-                先用数据检验，再让规则持续模拟。每一次成交和放弃，都留下原因。
-              </p>
-              <div className="flow">
-                {["SCAN", "CHECK", "SIZE", "EXEC", "LOG", "EQUITY"].map(
-                  (v, i) => (
-                    <span className={i === 0 ? "active" : ""} key={v}>
-                      {v}
-                    </span>
-                  ),
-                )}
-              </div>
-              <div className="actions">
-                <button
-                  className="primary"
-                  disabled={busy}
-                  onClick={() => void act("demo")}
-                >
-                  加载合成示例
-                </button>
-                <button onClick={() => setTab("strategy")}>创建策略 →</button>
-                <button
-                  onClick={() =>
-                    setNotice(
-                      bring(
-                        "请先 qt_status，帮我把一个数字资产现货想法转化为可验证策略；先解释假设，再做回测。",
-                      ) === "ok"
-                        ? "已带入对话，请检查后发送。"
-                        : "当前输入框不可用，请在左侧直接描述你的想法。",
-                    )
-                  }
-                >
-                  和助手讨论 ↗
-                </button>
-              </div>
-              <small>示例仅用于验证流程，明确标注为合成行情。</small>
-            </div>
-            <div className="grid">
-              {[
-                ["策略版本", snap.strategies.length],
-                ["数据快照", snap.datasets.length],
-                [
-                  "已完成回测",
-                  snap.runs.filter((r) => r.status === "completed").length,
-                ],
-                [
-                  "运行中模拟盘",
-                  snap.accounts.filter((a) => a.status === "running").length,
-                ],
-              ].map(([title, n]) => (
-                <div className="stat" key={title}>
-                  <small>{title}</small>
-                  <div className="number">{n}</div>
+            <ResearchWorkspace
+              rpc={rpc}
+              sessionId={sessionId}
+              visible={visible}
+              datasets={snap.datasets}
+              bring={bring}
+              onRun={(id) => {
+                chooseRun(id);
+                setTab("backtest");
+              }}
+            />
+            <details className="advanced-tools">
+              <summary>高级研究工具、示例与数据管理</summary>
+              <div className="card">
+                <div className="card-title">
+                  <h2>研究，从一个假设开始</h2>
+                  <span className="badge">现货 · 只做多</span>
                 </div>
-              ))}
-            </div>
-            <section className="card">
-              <h3>最近实验</h3>
-              {snap.runs.slice(0, 3).map((r) => (
-                <div className="row between" key={r.id}>
-                  <div>
-                    <span className="badge">{labels[r.status]}</span>
-                    <p className="mono">
-                      {r.id.slice(0, 8)} · {date(r.createdAt)}
-                    </p>
-                  </div>
+                <p className="muted">
+                  先用数据检验，再让规则持续模拟。每一次成交和放弃，都留下原因。
+                </p>
+                <div className="actions">
                   <button
-                    onClick={() => {
-                      chooseRun(r.id);
-                      setTab("backtest");
-                    }}
+                    className="primary"
+                    disabled={busy}
+                    onClick={() => void act("demo")}
                   >
-                    {r.metrics ? `${fmt(r.metrics.returnPct)}%` : "查看进度"} →
+                    加载合成示例
+                  </button>
+                  <button onClick={() => setTab("strategy")}>创建策略 →</button>
+                  <button
+                    onClick={() =>
+                      setNotice(
+                        bring(
+                          "请先 qt_status，帮我把一个数字资产现货想法转化为可验证策略；先解释假设，再做回测。",
+                        ) === "ok"
+                          ? "已带入对话，请检查后发送。"
+                          : "当前输入框不可用，请在左侧直接描述你的想法。",
+                      )
+                    }
+                  >
+                    和助手讨论 ↗
                   </button>
                 </div>
-              ))}
-              {!snap.runs.length && (
-                <p className="hint">
-                  加载数据、发布策略后，即可运行第一次历史回测。
-                </p>
-              )}
-            </section>
-            <section className="card">
-              <h3>本地数据管理</h3>
-              <div className="actions">
-                <button
-                  disabled={busy}
-                  onClick={() =>
-                    void act(
-                      "backup",
-                      {},
-                      (v) => download("quant-backup.json", JSON.stringify(v)),
-                      false,
-                    )
-                  }
-                >
-                  导出完整备份
-                </button>
-                <label>
-                  恢复到空数据目录
-                  <input
-                    className="file"
-                    type="file"
-                    accept=".json"
-                    disabled={busy}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (!f) return;
-                      if (f.size > 64 * 1024 * 1024) {
-                        setError("备份超过 64 MB");
-                        return;
-                      }
-                      void f
-                        .text()
-                        .then((t) => {
-                          let backup: unknown;
-                          try {
-                            backup = JSON.parse(t);
-                          } catch {
-                            setError("JSON 格式无效");
-                            return;
-                          }
-                          void act("restore", { backup });
-                        })
-                        .catch((e) => setError(e.message));
-                      e.target.value = "";
-                    }}
-                  />
-                </label>
+                <small>示例仅用于验证流程，明确标注为合成行情。</small>
               </div>
-              <p className="hint">
-                备份不含 Harness 登录与模型密钥；恢复不会自动启动模拟任务。
-              </p>
-            </section>
+              <div className="grid">
+                {[
+                  ["策略版本", snap.strategies.length],
+                  ["数据快照", snap.datasets.length],
+                  [
+                    "已完成回测",
+                    snap.runs.filter((r) => r.status === "completed").length,
+                  ],
+                  [
+                    "运行中模拟盘",
+                    snap.accounts.filter((a) => a.status === "running").length,
+                  ],
+                ].map(([title, n]) => (
+                  <div className="stat" key={title}>
+                    <small>{title}</small>
+                    <div className="number">{n}</div>
+                  </div>
+                ))}
+              </div>
+              <section className="card">
+                <h3>最近实验</h3>
+                {snap.runs.slice(0, 3).map((r) => (
+                  <div className="row between" key={r.id}>
+                    <div>
+                      <span className="badge">{labels[r.status]}</span>
+                      <p className="mono">
+                        {r.id.slice(0, 8)} · {date(r.createdAt)}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        chooseRun(r.id);
+                        setTab("backtest");
+                      }}
+                    >
+                      {r.metrics ? `${fmt(r.metrics.returnPct)}%` : "查看进度"}{" "}
+                      →
+                    </button>
+                  </div>
+                ))}
+                {!snap.runs.length && (
+                  <p className="hint">
+                    加载数据、发布策略后，即可运行第一次历史回测。
+                  </p>
+                )}
+              </section>
+              <section className="card">
+                <h3>本地数据管理</h3>
+                <div className="actions">
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      void act(
+                        "backup",
+                        {},
+                        (v) => download("quant-backup.json", JSON.stringify(v)),
+                        false,
+                      )
+                    }
+                  >
+                    导出完整备份
+                  </button>
+                  <label>
+                    恢复到空数据目录
+                    <input
+                      className="file"
+                      type="file"
+                      accept=".json"
+                      disabled={busy}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        if (f.size > 64 * 1024 * 1024) {
+                          setError("备份超过 64 MB");
+                          return;
+                        }
+                        void f
+                          .text()
+                          .then((t) => {
+                            let backup: unknown;
+                            try {
+                              backup = JSON.parse(t);
+                            } catch {
+                              setError("JSON 格式无效");
+                              return;
+                            }
+                            void act("restore", { backup });
+                          })
+                          .catch((e) => setError(e.message));
+                        e.target.value = "";
+                      }}
+                    />
+                  </label>
+                </div>
+                <p className="hint">
+                  备份不含 Harness 登录与模型密钥；恢复不会自动启动模拟任务。
+                </p>
+              </section>
+            </details>
           </>
         )}
         {snap && tab === "strategy" && (
@@ -1253,6 +1269,12 @@ export function Studio({
         )}
         {snap && tab === "paper" && (
           <>
+            <MonitoringPanel
+              rpc={rpc}
+              sessionId={sessionId}
+              visible={visible}
+              bring={bring}
+            />
             <section className="card">
               <h2>创建模拟账户</h2>
               <label>

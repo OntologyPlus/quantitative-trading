@@ -18,6 +18,13 @@ test("failed request retry reuses submission identity and does not show a false 
     async call(_channel: string, action: string, payload: any) {
       assert.equal(_channel, "/api");
       if (action === "quant/snapshot") return { ok: true, value: snapshot };
+      if (action === "quant/project-list")
+        return { ok: true, value: { projects: [], total: 0 } };
+      if (action === "quant/health")
+        return {
+          ok: true,
+          value: { agent: false, worker: true, storage: "ready" },
+        };
       writes.push(payload.input);
       if (fail) {
         fail = false;
@@ -51,8 +58,16 @@ test("saving a strategy preserves edits typed while its request is in flight", a
   let resolve: (v: any) => void = () => {};
   const rpc = {
     call: async (_channel: string, action: string) =>
-      action === "quant/snapshot"
-        ? { ok: true, value: snapshot }
+      ["quant/snapshot", "quant/project-list", "quant/health"].includes(action)
+        ? {
+            ok: true,
+            value:
+              action === "quant/snapshot"
+                ? snapshot
+                : action === "quant/project-list"
+                  ? { projects: [], total: 0 }
+                  : { agent: false, worker: true, storage: "ready" },
+          }
         : new Promise((r) => {
             resolve = r;
           }),
