@@ -36,8 +36,27 @@ import {
   verifyEvidence,
   verifyRun,
   renderAnalysis,
+  researchConclusion,
 } from "../research/evaluation.js";
 import { Research, uid, type DataJob } from "../host/research.js";
+import {
+  diagnosticPlan,
+  diagnosticConfig,
+  diagnosticsFinished,
+  minimumExperiments,
+  successfulDiagnostic,
+  type DiagnosticPlan,
+} from "../domain/robustness.js";
+import {
+  buildDiagnostics,
+  verifyDiagnosticRuns,
+} from "../research/diagnostics.js";
+import { isDeepStrictEqual } from "node:util";
+import type { Account } from "../domain/contracts.js";
+import type { SimulationTransition } from "../domain/simulation.js";
+import { loadSimulationReview } from "../host/simulation-review.js";
+import { makePromotionPreview } from "../research/promotion.js";
+import { observationEvent } from "../host/observation.js";
 
 export interface AgentBridge {
   deliver(dispatch: ModelDispatch): Promise<void>;
@@ -193,6 +212,17 @@ export class ProjectService {
     author: "user" | "ai" = "user",
   ) {
     const x = projectInput.parse(input);
+    if (x.simulationSource) {
+      const source = loadSimulationReview(
+        this.research,
+        x.simulationSource.reviewId,
+      ).review;
+      if (
+        source.accountId !== x.simulationSource.accountId ||
+        source.hash !== x.simulationSource.reviewHash
+      )
+        fail("SIMULATION_SOURCE", "后续研究的模拟复盘来源不一致");
+    }
     if (x.parentProjectId)
       this.store.get<ResearchProject>("project", x.parentProjectId);
     return this.store.submit(
@@ -518,6 +548,24 @@ export class ProjectService {
       return;
     }
     if (p.stage === "final") {
+      if (p.protocol.robustness) {
+        const selected = p.candidates.find(
+          (c) => c.id === p.selectedCandidateId,
+        )!;
+        const definition = this.store.get<StrategyRecord>(
+          "strategy",
+          selected.strategyId,
+        ).definition;
+        const next = diagnosticPlan(p, definition).find(
+          (plan) => !successfulDiagnostic(p, plan.diagnostic.key),
+        );
+        if (next) {
+          this.submitExperiment(p, next.candidateId, next.phase, next);
+          return;
+        }
+        if (!diagnosticsFinished(p, definition))
+          fail("DIAGNOSTIC_INCOMPLETE", "滚动训练或验证尚未完成");
+      }
       for (const phase of ["holdout", "stress"] as const)
         if (
           !p.experiments.some(
@@ -627,14 +675,23 @@ export class ProjectService {
     p: ResearchProject,
     candidateId: string,
     phase: Phase,
+    plan?: DiagnosticPlan,
   ) {
     const c = p.candidates.find((c) => c.id === candidateId)!;
-    const range = p.ranges[phase === "stress" ? "holdout" : phase];
-    const config = {
-      ...p.protocol.config,
-      ...range,
-      costs: { ...p.protocol.config.costs },
-    };
+    const range = plan
+      ? { from: plan.from, to: plan.to }
+      : p.ranges[
+          phase === "stress"
+            ? "holdout"
+            : (phase as "development" | "validation" | "holdout")
+        ];
+    const config = plan
+      ? diagnosticConfig(p, plan)
+      : {
+          ...p.protocol.config,
+          ...range,
+          costs: { ...p.protocol.config.costs },
+        };
     if (phase === "stress") {
       config.costs.feeBps = D(config.costs.feeBps)
         .mul(p.protocol.thresholds.stressMultiplier)
@@ -649,7 +706,10 @@ export class ProjectService {
         fail("EXPERIMENT_BUDGET", "实验预算已用尽");
       if (
         p.experiments.filter(
-          (e) => e.candidateId === candidateId && e.phase === phase,
+          (e) =>
+            e.candidateId === candidateId &&
+            e.phase === phase &&
+            e.diagnostic?.key === plan?.diagnostic.key,
         ).length >= 3
       )
         fail(
@@ -668,11 +728,32 @@ export class ProjectService {
             ? "检验保留区间成本放大后的表现"
             : "按冻结研究协议执行",
         createdAt: at(),
+        ...(plan ? { diagnostic: { ...plan.diagnostic } } : {}),
       };
+      let strategyId = c.strategyId;
+      if (plan?.diagnostic.definition) {
+        const original = this.store.get<StrategyRecord>(
+          "strategy",
+          c.strategyId,
+        );
+        const definition = strategySchema.parse(plan.diagnostic.definition);
+        const version: StrategyRecord = {
+          ...original,
+          id: uid(),
+          revision: 1,
+          createdAt: at(),
+          name: `${c.name} · 参数邻域`,
+          definition,
+          definitionHash: hash(definition),
+        };
+        this.store.put("strategy", version.id, version);
+        strategyId = version.id;
+        e.diagnostic!.strategyId = version.id;
+      }
       const run = this.research.submitRun(
         {
           submissionId: `pe-${e.id}`,
-          strategyId: c.strategyId,
+          strategyId,
           datasetIds: p.datasetIds,
           config,
         },
@@ -929,11 +1010,20 @@ export class ProjectService {
             fail("INVALID_STAGE", "最终候选冻结后不能追加寻参");
           if (
             p.candidates.length >= 6 ||
-            p.budgetUsed.experiments + 4 > p.protocol.budget.experiments
+            p.budgetUsed.experiments +
+              4 +
+              (minimumExperiments(
+                p.candidates.length + 1,
+                p.protocol.robustness,
+                p.protocol.candidates?.length ?? 2,
+              ) -
+                (p.candidates.length + 1) * 2 -
+                2) >
+              p.protocol.budget.experiments
           )
             fail(
               "EXPERIMENT_BUDGET",
-              "追加候选后需保留开发、验证及最终两项实验预算",
+              "追加候选后需保留开发、验证、稳健性研究及最终检验预算",
             );
           if (
             action.parentId &&
@@ -995,6 +1085,14 @@ export class ProjectService {
       status: p.status,
       stage: p.stage,
       protocol: p.protocol,
+      ...(p.protocol.simulationSource
+        ? {
+            sourceSimulationReview: loadSimulationReview(
+              this.research,
+              p.protocol.simulationSource.reviewId,
+            ).review,
+          }
+        : {}),
       ranges: p.ranges,
       protocolHash: p.protocolHash,
       candidates: p.candidates,
@@ -1028,8 +1126,43 @@ export class ProjectService {
     )) {
       const run = this.store.get<RunRecord>("run", experiment.runId);
       verifyRun(run);
+      if (
+        p.protocol.robustness &&
+        (!isDeepStrictEqual(experiment.metrics, run.result!.metrics) ||
+          !isDeepStrictEqual(experiment.evaluation, evaluate(p, run)))
+      )
+        fail("DIAGNOSTIC_EVIDENCE", "稳健性研究的评估摘要与真实结果不一致");
       for (const ref of p.report.facts.filter((f) => f.runId === run.id))
         verifyEvidence(ref, run, false);
+    }
+    if (p.protocol.robustness) {
+      const synthetic = this.validateDatasets(p, true).some((d) => d.synthetic);
+      if (
+        p.report.synthetic !== synthetic ||
+        p.report.conclusion !== researchConclusion(p, synthetic) ||
+        p.report.selectedCandidateId !== p.selectedCandidateId ||
+        !isDeepStrictEqual(p.report.facts, this.facts(p))
+      )
+        fail(
+          "DIAGNOSTIC_REPORT",
+          "稳健性报告的结论、候选或事实与冻结协议不一致",
+        );
+      const runs = p.experiments.map((e) =>
+        this.store.get<RunRecord>("run", e.runId),
+      );
+      verifyDiagnosticRuns(
+        p,
+        runs,
+        this.store.list<StrategyRecord>("strategy"),
+        true,
+      );
+      if (
+        !isDeepStrictEqual(
+          p.report.diagnostics,
+          buildDiagnostics(p, runs, p.report.facts),
+        )
+      )
+        fail("DIAGNOSTIC_REPORT", "报告稳健性结果与真实实验不一致");
     }
     return p;
   }
@@ -1043,6 +1176,15 @@ export class ProjectService {
       )
     )
       fail("DELIVERABLE_INCOMPLETE", "最终验证未完成，不能交付研究");
+    const runs = p.experiments.map((e) =>
+      this.store.get<RunRecord>("run", e.runId),
+    );
+    verifyDiagnosticRuns(
+      p,
+      runs,
+      this.store.list<StrategyRecord>("strategy"),
+      true,
+    );
     const facts = this.facts(p);
     for (const exp of p.experiments.filter((e) => e.status === "completed")) {
       const run = this.store.get<RunRecord>("run", exp.runId);
@@ -1050,8 +1192,9 @@ export class ProjectService {
       for (const f of facts.filter((f) => f.runId === run.id))
         verifyEvidence(f, run, false);
     }
-    const synthetic = this.validateDatasets(p, true).some((d) => d.synthetic);
-    p.report = makeReport(p, facts, synthetic);
+    const datasets = this.validateDatasets(p, true);
+    const synthetic = datasets.some((d) => d.synthetic);
+    p.report = makeReport(p, facts, synthetic, datasets, runs);
     p.status = "completed";
     p.reason = p.report.summary;
     p.error = "";
@@ -1129,11 +1272,49 @@ export class ProjectService {
         : p,
       events: this.store.events(p.id, x.after),
       evidence: this.facts(p),
+      datasets: p.datasetIds.map((id) =>
+        this.store.get<Dataset>("dataset", id),
+      ),
       dataJobs: p.dataJobIds.map((id) =>
         this.store.get<DataJob>("dataJob", id),
       ),
       asOf: at(),
     };
+  }
+  promotionPreview(input: unknown) {
+    const x = z
+      .object({ id, config: configInput, replacementAccountId: id.optional() })
+      .strict()
+      .parse(input);
+    const p = this.verifyReport(x.id),
+      candidate = p.candidates.find((c) => c.id === p.selectedCandidateId)!;
+    const target = this.store.get<StrategyRecord>(
+      "strategy",
+      candidate.strategyId,
+    );
+    const source = x.replacementAccountId
+      ? this.store.get<Account>("account", x.replacementAccountId)
+      : null;
+    const sourceVersion = source
+      ? this.store.get<StrategyRecord>("strategy", source.strategyId)
+      : null;
+    return makePromotionPreview(
+      p,
+      target,
+      x.config,
+      ENGINE_VERSION,
+      source,
+      sourceVersion,
+      !!(source && this.store.maybe("simulationTransition", source.id)),
+      p.experiments
+        .filter((e) => e.status === "completed")
+        .every(
+          (e) =>
+            this.store.get<RunRecord>("run", e.runId).config.engineVersion ===
+            ENGINE_VERSION,
+        ),
+      this.store.list<Account>("account"),
+    );
   }
   approve(input: unknown) {
     const x = z
@@ -1144,6 +1325,11 @@ export class ProjectService {
         reportHash: z.string(),
         config: configInput,
         name: z.string().min(1).max(100),
+        replacementAccountId: id.optional(),
+        previewHash: z
+          .string()
+          .regex(/^[a-f0-9]{64}$/)
+          .optional(),
       })
       .strict()
       .parse(input);
@@ -1163,6 +1349,19 @@ export class ProjectService {
           "EVALUATION_GATE",
           "本研究尚未满足模拟观察门槛，不能从报告推进运行",
         );
+      const preview = this.promotionPreview({
+        id: p.id,
+        config: x.config,
+        ...(x.replacementAccountId
+          ? { replacementAccountId: x.replacementAccountId }
+          : {}),
+      });
+      if (x.replacementAccountId && !x.previewHash)
+        fail("PROMOTION_PREVIEW", "替换账户前必须核对具体版本与配置差异");
+      if (x.previewHash && x.previewHash !== preview.hash)
+        fail("PROMOTION_PREVIEW", "账户或配置已变化，请重新核对变更预览");
+      if (!preview.canApprove)
+        fail("PROMOTION_BLOCKED", preview.blockers.join("；"));
       const c = p.candidates.find((c) => c.id === p.selectedCandidateId)!,
         original = this.store.get<StrategyRecord>("strategy", c.strategyId);
       if (hash(original.definition) !== c.definitionHash)
@@ -1194,7 +1393,41 @@ export class ProjectService {
         reportHash: p.report.hash,
         actor: "user",
         at: at(),
+        ...(x.replacementAccountId
+          ? {
+              replacementAccountId: x.replacementAccountId,
+              previewHash: preview.hash,
+            }
+          : {}),
       });
+      if (x.replacementAccountId) {
+        const source = this.store.get<Account>(
+          "account",
+          x.replacementAccountId,
+        );
+        source.status = "stopped";
+        source.generation++;
+        source.revision++;
+        source.error = "已由用户确认的新版本接替；新账户尚未启动";
+        observationEvent(this.store, source, "replaced", source.error);
+        this.store.put("account", source.id, source);
+        const transitionBody = {
+          id: source.id,
+          version: 1 as const,
+          fromAccountId: source.id,
+          toAccountId: account.id,
+          projectId: p.id,
+          reportHash: p.report.hash,
+          preview,
+          approvedBy: "user" as const,
+          approvedAt: at(),
+        };
+        const transition: SimulationTransition = {
+          ...transitionBody,
+          hash: hash(transitionBody),
+        };
+        this.store.put("simulationTransition", transition.id, transition);
+      }
       this.save(p, "paper_approved", {
         accountId: account.id,
         strategyId: version.id,

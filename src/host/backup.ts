@@ -23,6 +23,17 @@ import { join } from "node:path";
 import type { ResearchProject } from "../domain/project.js";
 import { validateProjects, validateDispatches } from "../research/backup.js";
 import type { MonitorRecord, Notice, SimulationReview } from "./monitor.js";
+import type {
+  SimulationApproval,
+  SimulationCheckpoint,
+} from "../domain/simulation.js";
+import {
+  observationSchema,
+  observationEventSchema,
+  verifySimulationCheckpoint,
+  verifySimulationReview,
+} from "./simulation-review.js";
+import { verifyTransition } from "../research/promotion.js";
 const MAX = 64 * 1024 * 1024;
 export function exportBackup(r: Research) {
   if (
@@ -48,6 +59,10 @@ export function exportBackup(r: Research) {
     "monitor",
     "notice",
     "simulationReview",
+    "observation",
+    "observationEvent",
+    "simulationCheckpoint",
+    "simulationTransition",
   ];
   const objects = Object.fromEntries(
       kinds.map((k) => [k, r.store.list<any>(k)]),
@@ -100,6 +115,10 @@ export function restoreBackup(r: Research, input: unknown) {
           monitor: z.array(z.unknown()).optional(),
           notice: z.array(z.unknown()).optional(),
           simulationReview: z.array(z.unknown()).optional(),
+          observation: z.array(z.unknown()).optional(),
+          observationEvent: z.array(z.unknown()).optional(),
+          simulationCheckpoint: z.array(z.unknown()).optional(),
+          simulationTransition: z.array(z.unknown()).optional(),
         })
         .strict(),
       data: z.record(id, z.unknown()),
@@ -194,6 +213,10 @@ export function restoreBackup(r: Research, input: unknown) {
     "monitor",
     "notice",
     "simulationReview",
+    "observation",
+    "observationEvent",
+    "simulationCheckpoint",
+    "simulationTransition",
   ] as const) {
     const withinKind = new Set<string>();
     for (const v of b.objects[kind] ?? []) {
@@ -372,20 +395,23 @@ export function restoreBackup(r: Research, input: unknown) {
     strategies,
   );
   const dispatches = validateDispatches(b.objects.dispatch ?? [], projects);
-  const approvals = (b.objects.approval ?? []).map((v) =>
-    z
-      .object({
-        id,
-        projectId: id,
-        strategyId: id,
-        definitionHash: z.string(),
-        configHash: z.string(),
-        reportHash: z.string(),
-        actor: z.literal("user"),
-        at: z.string(),
-      })
-      .strict()
-      .parse(v),
+  const approvals = (b.objects.approval ?? []).map(
+    (v) =>
+      z
+        .object({
+          id,
+          projectId: id,
+          strategyId: id,
+          definitionHash: z.string(),
+          configHash: z.string(),
+          reportHash: z.string(),
+          actor: z.literal("user"),
+          at: z.string(),
+          replacementAccountId: id.optional(),
+          previewHash: z.string().optional(),
+        })
+        .strict()
+        .parse(v) as SimulationApproval,
   );
   for (const a of approvals)
     if (
@@ -442,6 +468,11 @@ export function restoreBackup(r: Research, input: unknown) {
           status: z.string(),
           reason: z.string(),
           kind: z.literal("deterministic"),
+          version: z.literal(2).optional(),
+          checkpointId: id.optional(),
+          checkpointHash: z.string().optional(),
+          diagnosis: z.unknown().optional(),
+          hash: z.string().optional(),
         })
         .strict()
         .parse(v) as unknown as SimulationReview,
@@ -454,6 +485,57 @@ export function restoreBackup(r: Research, input: unknown) {
   for (const v of [...notices, ...simulationReviews])
     if (!accounts.some((a) => a.id === v.accountId))
       fail("BROKEN_REFERENCE", "运行观察引用无效");
+  const observations = (b.objects.observation ?? []).map((v) =>
+    observationSchema.parse(v),
+  );
+  const observationEvents = (b.objects.observationEvent ?? []).map((v) =>
+    observationEventSchema.parse(v),
+  );
+  for (const observation of observations)
+    if (!accounts.some((a) => a.id === observation.id))
+      fail("BROKEN_REFERENCE", "行情观察账户引用无效");
+  for (const event of observationEvents) {
+    const { id: eventId, ...body } = event;
+    if (
+      hash(body) !== eventId ||
+      !accounts.some((a) => a.id === event.accountId)
+    )
+      fail("BROKEN_REFERENCE", "行情观察事件身份或账户引用无效");
+  }
+  const checkpoints = (b.objects.simulationCheckpoint ?? []).map((v) =>
+    verifySimulationCheckpoint(
+      v,
+      accounts,
+      strategies,
+      approvals,
+      projects,
+      runs,
+      observationEvents,
+    ),
+  );
+  for (const review of simulationReviews)
+    if (review.version === 2) {
+      const checkpoint = checkpoints.find((c) => c.id === review.checkpointId);
+      if (!checkpoint) fail("BROKEN_REFERENCE", "模拟复盘缺少冻结快照");
+      verifySimulationReview(review, checkpoint);
+    }
+  for (const p of projects)
+    if (p.protocol.simulationSource) {
+      const source = p.protocol.simulationSource;
+      if (
+        !simulationReviews.some(
+          (review) =>
+            review.version === 2 &&
+            review.id === source.reviewId &&
+            review.accountId === source.accountId &&
+            review.hash === source.reviewHash,
+        )
+      )
+        fail("BROKEN_REFERENCE", "后续研究的模拟事实复盘来源无效");
+    }
+  const transitions = (b.objects.simulationTransition ?? []).map((v) =>
+    verifyTransition(v, accounts, strategies, projects, approvals),
+  );
   for (const e of b.events ?? []) {
     if (!projects.some((p) => p.id === e.project_id))
       fail("BROKEN_REFERENCE", "研究事件引用无效");
@@ -499,6 +581,10 @@ export function restoreBackup(r: Research, input: unknown) {
     for (const m of monitors) r.store.put("monitor", m.id, m);
     for (const n of notices) r.store.put("notice", n.id, n);
     for (const v of simulationReviews) r.store.put("simulationReview", v.id, v);
+    for (const v of observations) r.store.put("observation", v.id, v);
+    for (const v of observationEvents) r.store.put("observationEvent", v.id, v);
+    for (const v of checkpoints) r.store.put("simulationCheckpoint", v.id, v);
+    for (const v of transitions) r.store.put("simulationTransition", v.id, v);
     for (const e of b.events ?? [])
       r.store.db
         .prepare(

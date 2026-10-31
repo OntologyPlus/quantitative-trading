@@ -7,6 +7,19 @@ import {
 import type { EvidenceRef, ResearchProject } from "../domain/project.js";
 import { call, download, type Caller } from "./api.js";
 import { researchStyles } from "./research-styles.js";
+import { ResearchConditionsCard, ReportReading } from "./research-cards.js";
+import { PromotionPanel } from "./promotion-panel.js";
+import { RobustnessResults } from "./robustness-results.js";
+import {
+  minimumExperiments,
+  type RobustnessProtocol,
+} from "../domain/robustness.js";
+import {
+  checkResearchDraft,
+  costLabel,
+  eventDescription,
+  researchGuidance,
+} from "../domain/research-view.js";
 
 type Summary = Omit<ResearchProject, "experiments"> & {
   experimentCount: number;
@@ -17,6 +30,7 @@ type Detail = {
   project: ResearchProject;
   events: Event[];
   evidence: EvidenceRef[];
+  datasets?: Dataset[];
   dataJobs: {
     id: string;
     symbol: string;
@@ -48,6 +62,10 @@ const phases: Record<string, string> = {
   validation: "验证期",
   holdout: "最终保留区间",
   stress: "成本压力",
+  cost_sensitivity: "成本敏感性",
+  parameter_sensitivity: "参数稳定性",
+  walk_train: "滚动训练",
+  walk_test: "滚动验证",
 };
 const date = (v: string | number) =>
   new Date(v).toLocaleString("zh-CN", { hour12: false });
@@ -77,6 +95,8 @@ export function ResearchWorkspace({
   datasets,
   onRun,
   bring,
+  initialProjectId,
+  onPaper,
 }: {
   rpc: Caller;
   sessionId: string;
@@ -84,6 +104,8 @@ export function ResearchWorkspace({
   datasets: Dataset[];
   onRun: (id: string) => void;
   bring: (text: string) => string;
+  initialProjectId?: string;
+  onPaper?: () => void;
 }) {
   const [projects, setProjects] = useState<Summary[]>([]),
     [total, setTotal] = useState(0),
@@ -114,6 +136,18 @@ export function ResearchWorkspace({
     [mode, setMode] = useState("agent"),
     [datasetIds, setDatasetIds] = useState<string[]>([]);
   const [parentProjectId, setParentProjectId] = useState<string | undefined>();
+  const [robustness, setRobustness] = useState<
+    RobustnessProtocol | undefined
+  >();
+  const [inheritedConfig, setInheritedConfig] = useState<
+    ResearchProject["protocol"]["config"] | null
+  >(null);
+  const [inheritedBudget, setInheritedBudget] = useState<
+    ResearchProject["protocol"]["budget"] | null
+  >(null);
+  const [inheritedThresholds, setInheritedThresholds] = useState<
+    ResearchProject["protocol"]["thresholds"] | null
+  >(null);
   const end = Math.floor(Date.now() / 3600000) * 3600000 - 3600000;
   const [from, setFrom] = useState(() => utc(end - 180 * 86400000)),
     [to, setTo] = useState(() => utc(end)),
@@ -132,6 +166,13 @@ export function ResearchWorkspace({
     lock = useRef(false),
     submissions = useRef(new Map<string, string>()),
     cursor = useRef(0);
+  useEffect(() => {
+    if (initialProjectId) {
+      setSelected(initialProjectId);
+      setCreating(false);
+      setView("overview");
+    }
+  }, [initialProjectId]);
   useEffect(() => {
     if (typeof window === "undefined") return;
     const listener = (event: Event) => {
@@ -255,8 +296,8 @@ export function ResearchWorkspace({
       saved = true;
       if (g !== generation.current) return;
       submissions.current.delete(key);
-      done?.(result);
       setNotice("操作已完成。");
+      done?.(result);
       try {
         await refresh();
       } catch {
@@ -277,6 +318,44 @@ export function ResearchWorkspace({
     }
   }
   const p = detail?.project;
+  useEffect(() => {
+    if (
+      initialProjectId &&
+      p?.id === initialProjectId &&
+      p.status === "completed"
+    )
+      setView("report");
+  }, [initialProjectId, p?.id, p?.status]);
+  const guidance = p ? researchGuidance(p) : null;
+  const draftCheck = checkResearchDraft(
+    {
+      symbols: symbols
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean),
+      interval: interval as Interval,
+      from: Date.parse(`${from}Z`),
+      to: Date.parse(`${to}Z`),
+      datasetIds,
+      experiments,
+      minTrades,
+      maxBars: inheritedBudget?.maxBars ?? 100000,
+      ...(robustness ? { robustness } : {}),
+    },
+    datasets,
+  );
+  useEffect(() => {
+    if (checked)
+      document
+        .getElementById(`research-evidence-${checked.projectId}`)
+        ?.scrollIntoView?.({ block: "nearest" });
+  }, [checked]);
+  useEffect(() => {
+    if (view === "report" && p?.report)
+      document
+        .getElementById(`research-report-${p.id}`)
+        ?.scrollIntoView?.({ block: "start" });
+  }, [view, p?.id, p?.report?.hash]);
   const control = (action: string) => {
     if (p)
       void act("project-control", {
@@ -288,7 +367,11 @@ export function ResearchWorkspace({
   const choose = (id: string) => {
     setSelected(id);
     setCreating(false);
-    setView("overview");
+    setView(
+      projects.find((project) => project.id === id)?.status === "completed"
+        ? "report"
+        : "overview",
+    );
   };
   function chooseData(id: string, enabled: boolean) {
     const chosen = datasets.find((d) => d.id === id)!;
@@ -330,7 +413,36 @@ export function ResearchWorkspace({
     setCash(project.protocol.config.initialCash);
     setFee(project.protocol.config.costs.feeBps);
     setSlip(project.protocol.config.costs.slippageBps);
+    setInheritedConfig(project.protocol.config);
+    setInheritedBudget(project.protocol.budget);
+    setInheritedThresholds(project.protocol.thresholds);
+    setResume(project.protocol.resumeOnRestart);
+    setRobustness(project.protocol.robustness);
     setCreating(true);
+  }
+  function askProject(question: string) {
+    if (p)
+      setNotice(
+        bring(`请读取研究项目 ${p.id}，依据真实实验与证据回答：${question}`) ===
+          "ok"
+          ? "已带入对话，请检查后发送。"
+          : "请在聊天中引用项目身份。",
+      );
+  }
+  function inspectExperiment(experimentId: string) {
+    if (!p || !detail) return;
+    setView("experiments");
+    setChecked(null);
+    const ref = detail.evidence.find(
+      (f) => f.experimentId === experimentId && f.path === "metrics.returnPct",
+    );
+    if (ref)
+      void act<EvidenceRef>(
+        "project-evidence",
+        { id: p.id, evidenceId: ref.id },
+        setChecked,
+        false,
+      );
   }
   return (
     <section className="research-space" aria-label="研究委托工作空间">
@@ -346,6 +458,10 @@ export function ResearchWorkspace({
           onClick={() => {
             setCreating(true);
             setParentProjectId(undefined);
+            setInheritedConfig(null);
+            setInheritedBudget(null);
+            setInheritedThresholds(null);
+            setRobustness(undefined);
             setNotice("");
           }}
         >
@@ -389,6 +505,10 @@ export function ResearchWorkspace({
           className="card research-create"
           onSubmit={(e) => {
             e.preventDefault();
+            if (draftCheck.errors.length) {
+              setError(draftCheck.errors.join("；"));
+              return;
+            }
             void act<ResearchProject>(
               "project-create",
               {
@@ -403,15 +523,26 @@ export function ResearchWorkspace({
                 to: Date.parse(`${to}Z`),
                 datasetIds,
                 mode,
-                budget: { experiments, modelRequests: requests },
+                ...(robustness ? { robustness } : {}),
+                budget: {
+                  ...inheritedBudget,
+                  experiments,
+                  modelRequests: requests,
+                },
                 thresholds: {
+                  ...inheritedThresholds,
                   minClosedTrades: minTrades,
                   maxDrawdownPct: drawdown,
                   minExcessReturnPct: excess,
                 },
                 config: {
+                  ...(inheritedConfig ?? {}),
                   initialCash: cash,
-                  costs: { feeBps: fee, slippageBps: slip },
+                  costs: {
+                    ...inheritedConfig?.costs,
+                    feeBps: fee,
+                    slippageBps: slip,
+                  },
                 },
                 resumeOnRestart: resume,
                 ...(parentProjectId ? { parentProjectId } : {}),
@@ -421,9 +552,47 @@ export function ResearchWorkspace({
           }}
         >
           <h3>这次想验证什么</h3>
+          <p className="hint">
+            先描述问题，再核对条件。系统在本次预算内完成比较，交付结论、反证和下一步。
+          </p>
+          <div className="actions" aria-label="研究起点">
+            <button
+              type="button"
+              onClick={() => {
+                setName("趋势策略比较");
+                setObjective(
+                  "比较均线交叉与区间突破，依据验证期、最终区间和成本压力结果判断是否值得模拟观察。",
+                );
+              }}
+            >
+              比较两类策略
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setName("趋势策略成本检验");
+                setObjective(
+                  "比较均线交叉与区间突破，重点核查手续费和滑点增加后是否仍满足门槛，解释成本检验中的反证。",
+                );
+              }}
+            >
+              检验成本影响
+            </button>
+            <button
+              type="button"
+              disabled={!p?.report}
+              onClick={() => {
+                setCreating(false);
+                setView("report");
+              }}
+            >
+              解释已有结果
+            </button>
+          </div>
           {parentProjectId && (
             <p className="hint">
               将建立后续委托，保留原研究与预算记录。复用已经揭示的最终区间会被标记，不能作为新的盲测证据。
+              沿用原委托的仓位风险、成交量参与率与高级预算配置；当前页面会重新比较两类默认模板。
             </p>
           )}
           <label>
@@ -486,6 +655,108 @@ export function ResearchWorkspace({
               ? "沿用当前 Harness 模型配置，Agent 在预算内决定研究下一步。"
               : "按固定规则完成两个模板及最终检验，报告会明确标注未使用模型规划。"}
           </small>
+          <div className="draft-check">
+            <label className="choice">
+              <input
+                type="checkbox"
+                checked={!!robustness}
+                onChange={(e) => {
+                  const next = e.target.checked
+                    ? {
+                        version: 1 as const,
+                        costMultipliers: [1.5, 2, 3],
+                        parameterShiftPct: 20,
+                        walkForwardFolds: 3,
+                        minPassRatePct: 50,
+                      }
+                    : undefined;
+                  setRobustness(next);
+                  if (next)
+                    setExperiments((n) =>
+                      Math.max(n, minimumExperiments(2, next)),
+                    );
+                }}
+              />
+              启用稳健性研究（归因、成本情景、参数邻域与滚动验证）
+            </label>
+            <p className="hint">
+              启用后将提高所需实验预算，全部规则在启动前冻结；不会在最终区间上追加寻参。
+            </p>
+            {robustness && (
+              <div className="grid">
+                <label>
+                  验证期成本倍率
+                  <select
+                    value={robustness.costMultipliers.join(",")}
+                    onChange={(e) =>
+                      setRobustness({
+                        ...robustness,
+                        costMultipliers: e.target.value.split(",").map(Number),
+                      })
+                    }
+                  >
+                    <option value="1.5,2,3">1.5 / 2 / 3 倍</option>
+                    <option value="2,3,4">2 / 3 / 4 倍</option>
+                  </select>
+                </label>
+                <label>
+                  参数邻域
+                  <select
+                    value={robustness.parameterShiftPct}
+                    onChange={(e) =>
+                      setRobustness({
+                        ...robustness,
+                        parameterShiftPct: Number(e.target.value),
+                      })
+                    }
+                  >
+                    {[10, 20, 30].map((v) => (
+                      <option key={v} value={v}>
+                        ±{v}%
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  滚动窗口
+                  <select
+                    value={robustness.walkForwardFolds}
+                    onChange={(e) =>
+                      setRobustness({
+                        ...robustness,
+                        walkForwardFolds: Number(e.target.value),
+                      })
+                    }
+                  >
+                    {[2, 3, 4].map((v) => (
+                      <option key={v} value={v}>
+                        {v} 个窗口
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  每类诊断最低通过率 %
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={robustness.minPassRatePct}
+                    onChange={(e) =>
+                      setRobustness({
+                        ...robustness,
+                        minPassRatePct: Number(e.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <p>
+                  当前委托至少需要 {minimumExperiments(2, robustness)}{" "}
+                  个实验。通过率是本次协议门槛，不代表盈利概率。
+                </p>
+              </div>
+            )}
+          </div>
           <details>
             <summary>数据、评估门槛与预算</summary>
             <div className="research-fields">
@@ -533,7 +804,7 @@ export function ResearchWorkspace({
                   最多实验数
                   <input
                     type="number"
-                    min={6}
+                    min={minimumExperiments(2, robustness)}
                     max={48}
                     value={experiments}
                     onChange={(e) => setExperiments(Number(e.target.value))}
@@ -582,6 +853,7 @@ export function ResearchWorkspace({
                 <label>
                   手续费 bps
                   <input value={fee} onChange={(e) => setFee(e.target.value)} />
+                  <small>{costLabel(fee)}，买入、卖出分别收取</small>
                 </label>
                 <label>
                   滑点 bps
@@ -589,6 +861,7 @@ export function ResearchWorkspace({
                     value={slip}
                     onChange={(e) => setSlip(e.target.value)}
                   />
+                  <small>{costLabel(slip)}，每次成交按不利方向调整</small>
                 </label>
               </div>
               <label className="choice">
@@ -601,11 +874,42 @@ export function ResearchWorkspace({
               </label>
             </div>
           </details>
+          <div
+            className="draft-check"
+            aria-label="委托预检查"
+            aria-live="polite"
+          >
+            <strong>开始前核对</strong>
+            <p>
+              系统预填资金、成本和门槛；请按实际研究假设修改。时间统一为 UTC。
+            </p>
+            {draftCheck.errors.map((s) => (
+              <p className="down" key={s}>
+                {s}
+              </p>
+            ))}
+            {draftCheck.warnings.map((s) => (
+              <p className="hint" key={s}>
+                {s}
+              </p>
+            ))}
+            {!draftCheck.errors.length && (
+              <p>
+                预计每交易对 {draftCheck.bars.toLocaleString("zh-CN")}{" "}
+                根K线；当前候选与所选检验至少需要
+                {minimumExperiments(2, robustness)}个实验。
+              </p>
+            )}
+          </div>
           <p className="hint">
             当前支持均线交叉与区间突破。会完成候选开发/验证、最终保留区间和双倍成本检验。先生成可核对的委托，再确认启动。
           </p>
           <div className="actions">
-            <button className="primary" type="submit" disabled={busy}>
+            <button
+              className="primary"
+              type="submit"
+              disabled={busy || draftCheck.errors.length > 0}
+            >
               生成研究委托
             </button>
             {creating && (
@@ -669,52 +973,99 @@ export function ResearchWorkspace({
               </small>
             </div>
             <p>{p.objective}</p>
+            {p.protocol.simulationSource && (
+              <div className="notice">
+                <strong>来自模拟事实复盘的关联研究</strong>
+                <p>
+                  保留来源账户与冻结复盘身份；研究不会修改原模拟账户。请重新核对数据区间、样本和预算。
+                </p>
+                <button
+                  onClick={() =>
+                    setNotice(
+                      bring(
+                        `请用 qt_monitor_read 的 id=${p.protocol.simulationSource!.reviewId} 读取本研究的来源事实复盘，并核对未解决问题。`,
+                      ) === "ok"
+                        ? "已带入对话，请检查后发送。"
+                        : "请在聊天中引用复盘身份。",
+                    )
+                  }
+                >
+                  核对来源复盘
+                </button>
+              </div>
+            )}
             <p className={p.error ? "down" : "muted"}>{p.reason}</p>
-            <div className="research-stages">
-              {[
-                ...(p.protocol.mode === "agent" ? ["planning"] : []),
-                "data",
-                "candidates",
-                "selection",
-                "final",
-                "report",
-              ].map((stage) => (
-                <span key={stage} className={p.stage === stage ? "active" : ""}>
-                  {phases[stage]}
-                </span>
-              ))}
-            </div>
-            <div className="grid">
-              <div className="stat">
-                <small>已完成实验 / 实验预算</small>
-                <div className="number">
-                  {p.experiments.filter((e) => e.status === "completed").length}{" "}
-                  / {p.protocol.budget.experiments}
-                </div>
-                <small>已使用 {p.budgetUsed.experiments} 个实验额度</small>
-              </div>
-              <div className="stat">
-                <small>模型请求 / 请求预算</small>
-                <div className="number">
-                  {p.budgetUsed.modelRequests} /{" "}
-                  {p.protocol.budget.modelRequests}
-                </div>
-                <small>
-                  计算 {(p.budgetUsed.computeMs / 1000).toFixed(1)} 秒 · 用量
-                  {p.budgetUsed.usageComplete ? "已报告" : "存在缺失"}
-                </small>
-              </div>
-            </div>
-            {detail.dataJobs
-              .filter((j) => ["queued", "running"].includes(j.status))
-              .map((j) => (
-                <div key={j.id}>
+            {guidance && (
+              <div className="research-guidance" role="status">
+                <strong>{guidance.now}</strong>
+                <p>{guidance.next}</p>
+                {p.error && p.error !== p.reason && (
+                  <p className="down">{p.error}</p>
+                )}
+                {p.protocol.parentProjectId && (
                   <small>
-                    {j.symbol} 数据准备 {j.progress}%
+                    关联自此前研究；原实验与区间使用记录保留，预算独立核对。
                   </small>
-                  <progress value={j.progress} max={100} />
+                )}
+              </div>
+            )}
+            <details open={!p.report}>
+              <summary>研究进度与预算</summary>
+              <div className="research-fields">
+                <div className="research-stages">
+                  {[
+                    ...(p.protocol.mode === "agent" ? ["planning"] : []),
+                    "data",
+                    "candidates",
+                    "selection",
+                    "final",
+                    "report",
+                  ].map((stage) => (
+                    <span
+                      key={stage}
+                      className={p.stage === stage ? "active" : ""}
+                    >
+                      {phases[stage]}
+                    </span>
+                  ))}
                 </div>
-              ))}
+                <div className="grid">
+                  <div className="stat">
+                    <small>已完成实验 / 实验预算</small>
+                    <div className="number">
+                      {
+                        p.experiments.filter((e) => e.status === "completed")
+                          .length
+                      }{" "}
+                      / {p.protocol.budget.experiments}
+                    </div>
+                    <small>已使用 {p.budgetUsed.experiments} 个实验额度</small>
+                  </div>
+                  <div className="stat">
+                    <small>模型请求 / 请求预算</small>
+                    <div className="number">
+                      {p.budgetUsed.modelRequests} /{" "}
+                      {p.protocol.budget.modelRequests}
+                    </div>
+                    <small>
+                      计算 {(p.budgetUsed.computeMs / 1000).toFixed(1)} 秒 ·
+                      用量
+                      {p.budgetUsed.usageComplete ? "已报告" : "存在缺失"}
+                    </small>
+                  </div>
+                </div>
+                {detail.dataJobs
+                  .filter((j) => ["queued", "running"].includes(j.status))
+                  .map((j) => (
+                    <div key={j.id}>
+                      <small>
+                        {j.symbol} 数据准备 {j.progress}%
+                      </small>
+                      <progress value={j.progress} max={100} />
+                    </div>
+                  ))}
+              </div>
+            </details>
             <div className="actions">
               {p.status === "draft" && (
                 <button
@@ -732,7 +1083,7 @@ export function ResearchWorkspace({
                   暂停研究
                 </button>
               )}
-              {["paused", "waiting_input"].includes(p.status) && (
+              {guidance?.resume && (
                 <button disabled={busy} onClick={() => control("resume")}>
                   恢复研究
                 </button>
@@ -748,13 +1099,7 @@ export function ResearchWorkspace({
               )}
               <button
                 onClick={() =>
-                  setNotice(
-                    bring(
-                      `请读取研究项目 ${p.id}，结合真实实验与证据回答我的问题。`,
-                    ) === "ok"
-                      ? "已带入对话，请检查后发送。"
-                      : "请在聊天中引用项目身份。",
-                  )
+                  askProject("请解释当前进度、阻塞原因与可执行的下一步。")
                 }
               >
                 带入对话
@@ -769,6 +1114,13 @@ export function ResearchWorkspace({
                 <button onClick={() => followup(p)}>新建后续研究</button>
               )}
             </div>
+            <details open={p.status === "draft"}>
+              <summary>本次研究条件与数据来源</summary>
+              <ResearchConditionsCard
+                project={p}
+                datasets={detail.datasets ?? datasets}
+              />
+            </details>
             <details open={p.status === "draft"}>
               <summary>冻结协议与授权范围</summary>
               <div className="research-fields">
@@ -812,7 +1164,7 @@ export function ResearchWorkspace({
               </div>
             </details>
           </div>
-          {p.status === "waiting_input" && (
+          {p.status === "waiting_input" && guidance?.answer && (
             <form
               className="card"
               onSubmit={(e) => {
@@ -867,6 +1219,7 @@ export function ResearchWorkspace({
                     <div className="event" key={event.sequence}>
                       <strong>{eventLabels[event.type] ?? event.type}</strong>
                       <small>{date(event.at)}</small>
+                      <p>{eventDescription(event.type, event.facts, p)}</p>
                       <details>
                         <summary>事件明细</summary>
                         <pre>{JSON.stringify(event.facts, null, 2)}</pre>
@@ -901,7 +1254,15 @@ export function ResearchWorkspace({
                               ?.name
                           }
                           <br />
-                          <small>{phases[e.phase]}</small>
+                          <small>
+                            {phases[e.phase]}
+                            {e.diagnostic?.fold !== undefined
+                              ? ` · 窗口${e.diagnostic.fold + 1}`
+                              : ""}
+                            {e.diagnostic?.multiplier
+                              ? ` · ${e.diagnostic.multiplier}倍`
+                              : ""}
+                          </small>
                         </td>
                         <td>
                           {
@@ -971,17 +1332,22 @@ export function ResearchWorkspace({
                         · {ref.runId.slice(0, 8)}
                       </small>
                       <span>
-                        {metricLabels[ref.path]}：{value(ref.value)}
+                        {metricLabels[ref.path] ?? ref.path}：{value(ref.value)}
                       </span>
                     </button>
                   ))}
                 </div>
               </details>
               {checked && (
-                <div className="notice" role="status">
+                <div
+                  className="notice"
+                  role="status"
+                  id={`research-evidence-${p.id}`}
+                >
                   <strong>证据身份与数值已核对</strong>
                   <p>
-                    {metricLabels[checked.path]}：{value(checked.value)}
+                    {metricLabels[checked.path] ?? checked.path}：
+                    {value(checked.value)}
                   </p>
                   <small>
                     Run {checked.runId} · {date(checked.from)} —{" "}
@@ -996,7 +1362,7 @@ export function ResearchWorkspace({
             </section>
           )}
           {view === "report" && (
-            <section className="card">
+            <section className="card" id={`research-report-${p.id}`}>
               {p.report ? (
                 <>
                   <span className="badge">
@@ -1009,6 +1375,28 @@ export function ResearchWorkspace({
                           : "证据不足"}
                   </span>
                   <h3>{p.report.summary}</h3>
+                  <ReportReading
+                    project={p}
+                    onExperiment={inspectExperiment}
+                    onFollowup={() => followup(p)}
+                    onQuestion={askProject}
+                  />
+                  {p.report.diagnostics && (
+                    <RobustnessResults
+                      project={p}
+                      onExperiment={inspectExperiment}
+                      onEvidence={(ref) => {
+                        setView("experiments");
+                        setChecked(null);
+                        void act<EvidenceRef>(
+                          "project-evidence",
+                          { id: p.id, evidenceId: ref.id },
+                          setChecked,
+                          false,
+                        );
+                      }}
+                    />
+                  )}
                   <div className="actions">
                     <button
                       onClick={() =>
@@ -1085,36 +1473,23 @@ export function ResearchWorkspace({
                         <strong>{value(f.value)} ↗</strong>
                       </button>
                     ))}
-                  <h3>适用范围与限制</h3>
-                  {p.report.limitations.map((s) => (
-                    <p className="hint" key={s}>
-                      {s}
-                    </p>
-                  ))}
                   {p.report.conclusion === "supported" &&
                     !p.report.synthetic && (
-                      <details>
-                        <summary>确认模拟观察配置</summary>
-                        <p>
-                          使用研究中的初始资金与风险配置创建模拟账户，账户创建后还需在模拟盘明确启动。
-                        </p>
-                        <pre>{JSON.stringify(p.protocol.config, null, 2)}</pre>
-                        <button
-                          disabled={busy}
-                          className="primary"
-                          onClick={() =>
-                            void act("project-approve", {
-                              id: p.id,
-                              expectedRevision: p.revision,
-                              reportHash: p.report!.hash,
-                              config: p.protocol.config,
-                              name: `${p.name} · 模拟观察`,
-                            })
-                          }
-                        >
-                          确认此配置并创建模拟账户
-                        </button>
-                      </details>
+                      <PromotionPanel
+                        key={p.id}
+                        project={p}
+                        rpc={rpc}
+                        sessionId={sessionId}
+                        busy={busy}
+                        {...(onPaper ? { onPaper } : {})}
+                        onApprove={(input) =>
+                          void act("project-approve", input, () =>
+                            setNotice(
+                              "新模拟账户已创建，尚未启动；请前往模拟盘核对。",
+                            ),
+                          )
+                        }
+                      />
                     )}
                 </>
               ) : (

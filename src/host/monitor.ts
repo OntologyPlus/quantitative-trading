@@ -2,7 +2,25 @@ import { z } from "zod";
 import { hash } from "../adapters/market.js";
 import { metrics } from "../engine/core.js";
 import { id, fail } from "../domain/schemas.js";
-import type { Account, Metrics } from "../domain/contracts.js";
+import {
+  INTERVAL_MS,
+  type Account,
+  type StrategyRecord,
+} from "../domain/contracts.js";
+import type { ResearchProject } from "../domain/project.js";
+import type {
+  ObservationRecord,
+  SimulationReview,
+} from "../domain/simulation.js";
+export type { SimulationReview } from "../domain/simulation.js";
+import { observationHealth } from "../domain/simulation-analysis.js";
+import {
+  captureSimulation,
+  makeSimulationReview,
+  loadSimulationReview,
+  simulationEvidence,
+  simulationEvidenceValues,
+} from "./simulation-review.js";
 import type { Research } from "./research.js";
 export interface MonitorRecord {
   id: string;
@@ -21,18 +39,6 @@ export interface Notice {
   at: string;
   resolvedAt: string | null;
   acknowledged: boolean;
-}
-export interface SimulationReview {
-  id: string;
-  accountId: string;
-  at: string;
-  from: number;
-  to: number;
-  metrics: Metrics;
-  observationGap: boolean;
-  status: string;
-  reason: string;
-  kind: "deterministic";
 }
 export class MonitorService {
   private closed = false;
@@ -100,6 +106,123 @@ export class MonitorService {
       return n;
     });
   }
+  review(input: unknown) {
+    const x = z.object({ submissionId: id, id }).strict().parse(input);
+    return this.research.store.submit(
+      x.submissionId,
+      "simulation-review",
+      x,
+      () => {
+        const checkpoint = captureSimulation(
+          this.research,
+          this.research.store.get<Account>("account", x.id),
+        );
+        const review = makeSimulationReview(
+          checkpoint,
+          hash({ account: x.id, submission: x.submissionId }),
+        );
+        this.research.store.put(
+          "simulationCheckpoint",
+          checkpoint.id,
+          checkpoint,
+        );
+        this.research.store.put("simulationReview", review.id, review);
+        return review;
+      },
+    );
+  }
+  read(input: unknown) {
+    const x = z
+      .object({ id, path: z.string().max(200).optional() })
+      .strict()
+      .parse(input);
+    if (x.path) return simulationEvidence(this.research, x.id, x.path);
+    const { review, checkpoint } = loadSimulationReview(this.research, x.id);
+    return {
+      review,
+      source: {
+        account: checkpoint.account,
+        definition: checkpoint.definition,
+        definitionHash: checkpoint.definitionHash,
+        baseline: checkpoint.baseline,
+        observation: checkpoint.observation,
+        events: checkpoint.events,
+      },
+      evidencePaths: Object.keys(simulationEvidenceValues(checkpoint)),
+    };
+  }
+  followupInput(input: unknown) {
+    const x = z
+      .object({
+        reviewId: id,
+        reviewHash: z.string(),
+        questionCode: z.string().max(100),
+      })
+      .strict()
+      .parse(input);
+    const { review, checkpoint } = loadSimulationReview(
+      this.research,
+      x.reviewId,
+    );
+    if (review.hash !== x.reviewHash)
+      fail("SIMULATION_REVIEW", "事实复盘已变化，请重新核对");
+    const question = review.diagnosis!.researchQuestions.find(
+      (q) => q.code === x.questionCode,
+    );
+    if (!question)
+      fail("SIMULATION_QUESTION", "请选择本次复盘中保留的研究问题");
+    const parent = checkpoint.baseline
+      ? this.research.store.get<ResearchProject>(
+          "project",
+          checkpoint.baseline.projectId,
+        )
+      : null;
+    const step = INTERVAL_MS[checkpoint.definition.interval],
+      to = Math.floor(Date.now() / step) * step - step;
+    const budget = parent?.protocol.budget ?? {
+      experiments: 12,
+      modelRequests: 20,
+      outputTokens: 2048,
+      maxBars: 100000,
+      computeSeconds: 600,
+      hours: 24,
+    };
+    const count = Math.min(
+      Math.floor((180 * 86400000) / step),
+      Math.floor(budget.maxBars / checkpoint.definition.symbols.length),
+    );
+    return {
+      name: `${checkpoint.account.name} · 观察后续研究`.slice(0, 100),
+      objective: question.objective,
+      symbols: checkpoint.definition.symbols,
+      interval: checkpoint.definition.interval,
+      from: to - (Math.max(180, count) - 1) * step,
+      to,
+      budget,
+      mode: parent?.protocol.mode ?? "protocol",
+      ...(parent
+        ? {
+            parentProjectId: parent.id,
+            thresholds: parent.protocol.thresholds,
+            ...(parent.protocol.robustness
+              ? { robustness: parent.protocol.robustness }
+              : {}),
+          }
+        : {}),
+      config: {
+        initialCash: checkpoint.account.config.initialCash,
+        risk: checkpoint.account.config.risk,
+        costs: checkpoint.account.config.costs,
+        from: 0,
+        to: 8640000000000000,
+      },
+      simulationSource: {
+        accountId: review.accountId,
+        reviewId: review.id,
+        reviewHash: review.hash!,
+      },
+    };
+  }
   private tick() {
     try {
       this.research.store.assertLease();
@@ -129,11 +252,27 @@ export class MonitorService {
         m.lastAccountStatus = a.status;
         s.put("monitor", m.id, m);
       }
+      const definition = s.get<StrategyRecord>(
+        "strategy",
+        a.strategyId,
+      ).definition;
+      const health = observationHealth(
+        a,
+        definition,
+        s.maybe<ObservationRecord>("observation", a.id),
+        now,
+      );
       const stale =
         a.status === "running" &&
         a.lastEventAt > 0 &&
         now - a.lastEventAt > 120000;
-      const fault = a.error || (stale ? "超过两分钟没有有效行情观察" : "");
+      const fault =
+        a.error ||
+        (health.state === "stale"
+          ? health.explanation
+          : stale
+            ? "超过两分钟没有有效行情观察"
+            : "");
       if (fault !== m.activeFault) {
         s.transaction(() => {
           if (m!.activeFault) {
@@ -167,21 +306,13 @@ export class MonitorService {
         });
       }
       if (now >= m.nextReviewAt && a.status !== "created") {
-        const review: SimulationReview = {
-          id: hash({ account: a.id, period: m.nextReviewAt }),
-          accountId: a.id,
-          at: new Date(now).toISOString(),
-          from: a.state.curve[0]?.at ?? now,
-          to: a.lastEventAt,
-          metrics: metrics(a.state, a.config),
-          observationGap: Boolean(fault) || a.status !== "running",
-          status: a.status,
-          reason:
-            fault ||
-            "按固定规则运行；本次为累计观察事实复盘，与历史回测区间不直接比较。",
-          kind: "deterministic",
-        };
+        const checkpoint = captureSimulation(this.research, a, now);
+        const review = makeSimulationReview(
+          checkpoint,
+          hash({ account: a.id, period: m.nextReviewAt }),
+        );
         s.transaction(() => {
+          s.put("simulationCheckpoint", checkpoint.id, checkpoint);
           s.put("simulationReview", review.id, review);
           const n: Notice = {
             id: review.id,
@@ -214,6 +345,16 @@ export class MonitorService {
       notices: s.page<Notice>("notice", x.offset, x.limit),
       total: s.count("notice"),
       reviews: s.page<SimulationReview>("simulationReview", 0, 20),
+      accounts: s
+        .list<Account>("account")
+        .map((a) =>
+          observationHealth(
+            a,
+            s.get<StrategyRecord>("strategy", a.strategyId).definition,
+            s.maybe<ObservationRecord>("observation", a.id),
+          ),
+        ),
+      transitions: s.page("simulationTransition", 0, 10),
       asOf: new Date().toISOString(),
       mode: "local-process",
       error: this.fault,

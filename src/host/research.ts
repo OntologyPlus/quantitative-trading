@@ -34,6 +34,7 @@ import {
 } from "../domain/contracts.js";
 import { ENGINE_VERSION } from "../engine/backtest.js";
 import { assertLedger, initialState } from "../engine/core.js";
+import { observationEvent } from "./observation.js";
 export interface DataJob {
   id: string;
   symbol: string;
@@ -78,7 +79,10 @@ export class Research {
         a.error = "宿主已重启；检查数据与账本后手动恢复，不补记缺口成交";
         a.revision++;
         a.generation++;
-        this.store.put("account", a.id, a);
+        this.store.transaction(() => {
+          observationEvent(this.store, a, "restart", a.error);
+          this.store.put("account", a.id, a);
+        });
       }
     setImmediate(() => void this.pump());
   }

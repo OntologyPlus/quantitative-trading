@@ -25,12 +25,16 @@ export const ACTIONS = [
   "project-read",
   "project-control",
   "project-approve",
+  "project-promotion-preview",
   "project-answer",
   "project-export",
   "project-evidence",
   "health",
   "monitor-list",
   "monitor-config",
+  "monitor-review",
+  "monitor-read",
+  "monitor-followup",
   "notice-ack",
 ] as const;
 export default class QuantRPC extends Service {

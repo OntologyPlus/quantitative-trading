@@ -8,6 +8,12 @@ import {
   symbol,
 } from "./schemas.js";
 import { INTERVAL_MS, type Metrics } from "./contracts.js";
+import {
+  robustnessInput,
+  minimumExperiments,
+  type DiagnosticMeta,
+} from "./robustness.js";
+import type { ResearchDiagnostics } from "../research/diagnostics.js";
 
 export const projectStatus = z.enum([
   "draft",
@@ -29,6 +35,14 @@ export const projectInput = z
     name: z.string().trim().min(1).max(100),
     objective: z.string().trim().min(5).max(4000),
     parentProjectId: id.optional(),
+    simulationSource: z
+      .object({
+        accountId: id,
+        reviewId: id,
+        reviewHash: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .optional(),
     symbols: z
       .array(symbol)
       .min(1)
@@ -40,6 +54,7 @@ export const projectInput = z
     datasetIds: z.array(id).max(5).default([]),
     candidates: z.array(strategySchema).min(1).max(6).optional(),
     mode: z.enum(["agent", "protocol"]).default("agent"),
+    robustness: robustnessInput.optional(),
     budget: z
       .object({
         experiments: z.number().int().min(6).max(48).default(12),
@@ -106,15 +121,38 @@ export const projectInput = z
         code: "custom",
         message: "候选的市场与周期必须与研究协议一致",
       });
-    if (p.budget.experiments < (p.candidates?.length ?? 2) * 2 + 2)
+    if (
+      p.budget.experiments <
+      minimumExperiments(p.candidates?.length ?? 2, p.robustness)
+    )
       ctx.addIssue({
         code: "custom",
-        message: "实验预算不足以完成候选开发、验证及最终保留和成本检验",
+        message: `实验预算不足，当前协议至少需要 ${minimumExperiments(p.candidates?.length ?? 2, p.robustness)} 个实验（含最终检验与所选稳健性研究）`,
+      });
+    if (
+      p.robustness &&
+      p.robustness.costMultipliers.some(
+        (m) =>
+          Number(p.config.costs.feeBps) * m > 1000 ||
+          Number(p.config.costs.slippageBps) * m > 1000,
+      )
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "成本情景放大后的手续费或滑点超过引擎1000bps上限",
       });
   });
 
 export type ProjectInput = z.infer<typeof projectInput>;
-export type Phase = "development" | "validation" | "holdout" | "stress";
+export type Phase =
+  | "development"
+  | "validation"
+  | "holdout"
+  | "stress"
+  | "cost_sensitivity"
+  | "parameter_sensitivity"
+  | "walk_train"
+  | "walk_test";
 export interface ResearchCandidate {
   id: string;
   strategyId: string;
@@ -145,6 +183,7 @@ export interface ProjectExperiment {
   resultHash?: string;
   evaluation?: Evaluation;
   computeMs?: number;
+  diagnostic?: DiagnosticMeta;
 }
 export interface EvidenceRef {
   id: string;
@@ -192,6 +231,7 @@ export interface ProjectReport {
   }[];
   hash: string;
   markdown: string;
+  diagnostics?: ResearchDiagnostics;
 }
 export interface ResearchProject {
   id: string;

@@ -5,23 +5,33 @@ import type {
   Notice,
   SimulationReview,
 } from "../host/monitor.js";
+import type {
+  SimulationHealth,
+  SimulationTransition,
+} from "../domain/simulation.js";
+import type { ResearchProject } from "../domain/project.js";
+import { SimulationReviewCard } from "./simulation-review-card.js";
 interface Snapshot {
   monitors: MonitorRecord[];
   notices: Notice[];
   reviews: SimulationReview[];
   asOf: string;
   error?: string;
+  accounts?: SimulationHealth[];
+  transitions?: SimulationTransition[];
 }
 export function MonitoringPanel({
   rpc,
   sessionId,
   visible,
   bring,
+  onProject,
 }: {
   rpc: Caller;
   sessionId: string;
   visible: boolean;
   bring: (text: string) => string;
+  onProject: (id: string) => void;
 }) {
   const [snap, setSnap] = useState<Snapshot | null>(null),
     [error, setError] = useState(""),
@@ -34,7 +44,10 @@ export function MonitoringPanel({
     const refresh = () =>
       void call<Snapshot>(rpc, sessionId, "monitor-list", {}, c.signal)
         .then((v) => {
-          if (!c.signal.aborted) setSnap(v);
+          if (!c.signal.aborted) {
+            setSnap(v);
+            setError("");
+          }
         })
         .catch((e) => {
           if (!c.signal.aborted) setError(e.message);
@@ -46,7 +59,11 @@ export function MonitoringPanel({
       if (timer) clearInterval(timer);
     };
   }, [rpc, sessionId, visible]);
-  async function update(action: string, input: Record<string, unknown>) {
+  async function update<T = unknown>(
+    action: string,
+    input: Record<string, unknown>,
+    done?: (v: T) => void,
+  ) {
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
@@ -58,9 +75,13 @@ export function MonitoringPanel({
       submission.current.set(key, id);
     }
     try {
-      await call(rpc, sessionId, action, { ...input, submissionId: id });
+      const value = await call<T>(rpc, sessionId, action, {
+        ...input,
+        submissionId: id,
+      });
       submission.current.delete(key);
       setSnap(await call<Snapshot>(rpc, sessionId, "monitor-list"));
+      done?.(value);
     } catch (e) {
       setError(e instanceof Error ? e.message : "更新失败");
     } finally {
@@ -70,6 +91,7 @@ export function MonitoringPanel({
   }
   return (
     <section className="card" aria-label="运行观察与复盘">
+      <style>{`.qt .simulation-review{display:grid;gap:12px;min-width:0}.qt .simulation-review p,.qt .simulation-review h4{margin:0}.qt .simulation-review li{line-height:1.8;overflow-wrap:anywhere}.qt .simulation-review td{white-space:normal;min-width:90px}`}</style>
       <div className="row between">
         <h3>运行观察与复盘</h3>
         <span className="badge">本地观察</span>
@@ -83,6 +105,58 @@ export function MonitoringPanel({
         </p>
       )}
       {notice && <p role="status">{notice}</p>}
+      {snap?.accounts?.map((a) => (
+        <div className="stat" key={a.accountId}>
+          <strong>
+            {a.name} ·{" "}
+            {
+              {
+                waiting: "等待行情",
+                current: "当前记录有效",
+                stale: "行情或估值过期",
+                paused: "未运行",
+                unknown: "历史记录不完整",
+              }[a.state]
+            }
+          </strong>
+          <p>{a.explanation}</p>
+          <p className="hint">
+            最后连接事件：
+            {a.lastTransportAt
+              ? new Date(a.lastTransportAt).toLocaleString("zh-CN")
+              : "未记录"}
+            ；最后有效行情：
+            {a.lastMarketAt
+              ? new Date(a.lastMarketAt).toLocaleString("zh-CN")
+              : "尚未观察"}
+            。
+          </p>
+          <p className="hint">
+            累计中断 {a.gapCount ?? "未知"} 次 ·{" "}
+            {a.gapMs === null
+              ? "时长未知"
+              : `${(a.gapMs / 60000).toFixed(1)} 分钟`}
+            ；
+            {a.historyComplete
+              ? "已记录观察生命周期"
+              : "升级前或启动前历史不完整"}
+            。
+            {a.stalePositions.length
+              ? `待核对估值：${a.stalePositions.join(" / ")}`
+              : ""}
+          </p>
+          <button
+            disabled={busy}
+            onClick={() =>
+              void update("monitor-review", { id: a.accountId }, () =>
+                setNotice("当前账本与观察记录已冻结，可在下方核对事实复盘。"),
+              )
+            }
+          >
+            生成当前事实复盘
+          </button>
+        </div>
+      ))}
       {snap?.notices
         .filter((n) => !n.acknowledged)
         .map((n) => (
@@ -131,34 +205,47 @@ export function MonitoringPanel({
         </div>
       ))}
       {snap?.reviews.slice(0, 5).map((review) => (
-        <div key={review.id} className="stat">
-          <small>
-            {new Date(review.at).toLocaleString("zh-CN")} · 累计事实复盘
-          </small>
-          <p>
-            累计收益 {Number(review.metrics.returnPct).toFixed(2)}% · 最大回撤{" "}
-            {Number(review.metrics.maxDrawdownPct).toFixed(2)}% ·{" "}
-            {review.metrics.closedTrades} 笔平仓
-          </p>
-          <p className="hint">
-            {review.reason}
-            {review.observationGap ? " 期间存在暂停或观察缺口。" : ""}
-          </p>
-          <button
-            onClick={() =>
-              setNotice(
-                bring(
-                  `请用 qt_monitor_read 读取事实复盘 ${review.id}，并读取模拟账户 ${review.accountId} 与其决策日志进行解释，结合实际观察区间，不直接与不同区间回测收益比较。`,
-                ) === "ok"
-                  ? "已带入对话，请检查后发送。"
-                  : "请在聊天中引用账户身份。",
-              )
-            }
-          >
-            带入对话分析
-          </button>
-        </div>
+        <SimulationReviewCard
+          key={review.id}
+          review={review}
+          rpc={rpc}
+          sessionId={sessionId}
+          busy={busy}
+          bring={bring}
+          onProject={onProject}
+          onFollowup={(review, code) =>
+            void update<ResearchProject>(
+              "monitor-followup",
+              { id: review.id, reviewHash: review.hash!, questionCode: code },
+              (project) => onProject(project.id),
+            )
+          }
+        />
       ))}
+      {!!snap?.transitions?.length && (
+        <details>
+          <summary>已批准的运行版本变更</summary>
+          {snap.transitions.map((t) => (
+            <div className="stat" key={t.id}>
+              <strong>
+                {t.preview.source?.name ?? t.fromAccountId.slice(0, 8)} → 新账户{" "}
+                {t.toAccountId.slice(0, 8)}
+              </strong>
+              <p>
+                {new Date(t.approvedAt).toLocaleString("zh-CN")} · 用户已确认 ·
+                原账户记录保留
+              </p>
+              <button onClick={() => onProject(t.projectId)}>
+                核对研究与批准依据
+              </button>
+              <details>
+                <summary>变更明细与身份</summary>
+                <pre>{JSON.stringify(t, null, 2)}</pre>
+              </details>
+            </div>
+          ))}
+        </details>
+      )}
     </section>
   );
 }

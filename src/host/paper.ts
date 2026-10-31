@@ -19,6 +19,7 @@ import {
 import { barSchema, fail, id } from "../domain/schemas.js";
 import { ENGINE_VERSION } from "../engine/backtest.js";
 import { Research } from "./research.js";
+import { observationEvent, observationMarket } from "./observation.js";
 interface Runtime {
   socket: WebSocket | null;
   controller: AbortController;
@@ -74,6 +75,11 @@ export class Paper {
     if (a.revision !== x.expectedRevision)
       fail("REVISION_CONFLICT", "账户已更新，请刷新后重试");
     if (x.action === "start" || x.action === "resume") {
+      if (this.store.maybe("simulationTransition", a.id))
+        fail(
+          "ACCOUNT_REPLACED",
+          "此账户已由用户确认的新版本接替，请查看新模拟账户",
+        );
       if (a.config.engineVersion !== ENGINE_VERSION)
         fail(
           "ENGINE_MISMATCH",
@@ -174,6 +180,12 @@ export class Paper {
           a.generation++;
           a.revision++;
           a.error = "正在连接公共行情，尚未开始观察";
+          observationEvent(
+            this.store,
+            a,
+            x.action === "start" ? "start" : "resume",
+            "用户已明确启动固定版本，等待公共行情连接",
+          );
           this.save(a);
           return this.summary(a);
         },
@@ -244,6 +256,12 @@ export class Paper {
       a.generation++;
       a.revision++;
       a.error = "";
+      observationEvent(
+        this.store,
+        a,
+        x.action === "pause" ? "pause" : "stop",
+        "用户停止观察，持仓保留，不补记缺口成交",
+      );
       this.save(a);
       return this.summary(a);
     });
@@ -312,13 +330,23 @@ export class Paper {
         const current = this.valid(a.id, r);
         if (current) {
           current.error = "";
-          this.store.put("account", current.id, current);
+          this.store.transaction(() => {
+            observationEvent(
+              this.store,
+              current,
+              "connected",
+              "公共行情连接已建立",
+            );
+            this.store.put("account", current.id, current);
+          });
         }
       });
       r.socket.addEventListener("message", (event) => {
         r.lastMessage = Date.now();
         try {
           const k = JSON.parse(String(event.data)).data?.k;
+          if (this.valid(a.id, r))
+            observationMarket(this.store, a.id, "transport", Date.now());
           if (k?.x)
             void this.onBar(
               a.id,
@@ -344,7 +372,15 @@ export class Paper {
         const current = this.valid(a.id, r);
         if (current) {
           current.error = "行情连接中断，正在重连；当前不能监控保护退出";
-          this.store.put("account", current.id, current);
+          this.store.transaction(() => {
+            observationEvent(
+              this.store,
+              current,
+              "disconnected",
+              current.error,
+            );
+            this.store.put("account", current.id, current);
+          });
         }
         if (r.controller.signal.aborted) return;
         if (++r.retries > 5) {
@@ -384,7 +420,10 @@ export class Paper {
         a.error = message;
         a.generation++;
         a.revision++;
-        this.store.transaction(() => this.save(a));
+        this.store.transaction(() => {
+          observationEvent(this.store, a, "fault", message);
+          this.save(a);
+        });
       }
     } catch (e) {
       this.faults.set(
@@ -501,7 +540,16 @@ export class Paper {
       if (!this.valid(id, r)) return;
       mark(a.state, a.config, Date.now());
       a.lastEventAt = Date.now();
-      this.store.transaction(() => this.save(a));
+      this.store.transaction(() => {
+        this.save(a);
+        observationMarket(
+          this.store,
+          a.id,
+          "bar",
+          a.lastEventAt,
+          bar.time + step,
+        );
+      });
     } catch (e) {
       this.fault(id, r, e instanceof Error ? e.message : String(e));
     } finally {
@@ -515,11 +563,13 @@ export class Paper {
     try {
       let a = this.valid(id, r);
       if (!a) return;
+      let quoteObservedAt = 0;
       for (const sym of Object.keys(a.state.positions)) {
         const q = await this.market.quote(sym, r.controller.signal);
         if (!this.valid(id, r)) return;
         a.state.prices[sym] = q.price;
         a.lastQuoteAt[sym] = q.observedAt;
+        quoteObservedAt = Math.max(quoteObservedAt, q.observedAt);
         const p = a.state.positions[sym]!,
           stop = D(p.stop),
           take = D(p.take);
@@ -560,7 +610,11 @@ export class Paper {
       mark(a.state, a.config, Date.now());
       a.lastEventAt = Date.now();
       a.error = "";
-      this.store.transaction(() => this.save(a));
+      this.store.transaction(() => {
+        this.save(a);
+        if (quoteObservedAt)
+          observationMarket(this.store, a.id, "quote", quoteObservedAt);
+      });
     } catch (e) {
       const a = this.valid(id, r);
       if (a) {
@@ -578,6 +632,16 @@ export class Paper {
       void this.onBar(id, r, next.bar, next.strategy);
   }
   close() {
-    for (const id of [...this.runtimes.keys()]) this.detach(id);
+    for (const id of [...this.runtimes.keys()]) {
+      try {
+        observationEvent(
+          this.store,
+          this.store.get<Account>("account", id),
+          "closed",
+          "本地执行进程关闭，期间无法观察行情",
+        );
+      } catch {}
+      this.detach(id);
+    }
   }
 }

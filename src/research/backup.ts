@@ -19,7 +19,10 @@ import {
   evaluate,
   verifyEvidence,
   renderAnalysis,
+  researchConclusion,
 } from "./evaluation.js";
+import { diagnosticMeta } from "../domain/robustness.js";
+import { verifyDiagnosticRuns, buildDiagnostics } from "./diagnostics.js";
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const integer = z.number().int().nonnegative();
 const candidate = z
@@ -36,7 +39,16 @@ const exp = z
   .object({
     id,
     candidateId: id,
-    phase: z.enum(["development", "validation", "holdout", "stress"]),
+    phase: z.enum([
+      "development",
+      "validation",
+      "holdout",
+      "stress",
+      "cost_sensitivity",
+      "parameter_sensitivity",
+      "walk_train",
+      "walk_test",
+    ]),
     runId: id,
     status: z.enum([
       "planned",
@@ -56,6 +68,7 @@ const exp = z
     resultHash: digest.optional(),
     evaluation: z.unknown().optional(),
     computeMs: integer.optional(),
+    diagnostic: diagnosticMeta.optional(),
   })
   .strict();
 const projectShape = z
@@ -212,7 +225,9 @@ export function validateProjects(
       if (
         !run ||
         !p.candidates.some(
-          (c) => c.id === e.candidateId && c.strategyId === run.strategyId,
+          (c) =>
+            c.id === e.candidateId &&
+            (e.diagnostic?.strategyId ?? c.strategyId) === run.strategyId,
         )
       )
         fail("BROKEN_REFERENCE", "研究实验引用无效");
@@ -236,6 +251,7 @@ export function validateProjects(
     for (const a of p.analyses)
       if (renderAnalysis(a.template ?? a.text, facts, a.evidenceIds) !== a.text)
         fail("PROJECT_EVIDENCE", "解释中的数值与证据不一致");
+    verifyDiagnosticRuns(p, runs, strategies, p.status === "completed");
     if (v.report) {
       const report = z
         .object({
@@ -253,6 +269,7 @@ export function validateProjects(
           experiments: z.array(z.unknown()),
           hash: digest,
           markdown: z.string(),
+          diagnostics: z.unknown().optional(),
         })
         .strict()
         .parse(v.report) as ProjectReport;
@@ -275,6 +292,24 @@ export function validateProjects(
           fail("PROJECT_EVIDENCE", "报告事实与实验不一致");
         verifyEvidence(ref, runs.find((r) => r.id === ref.runId)!);
       }
+      if (
+        p.protocol.robustness &&
+        !isDeepStrictEqual(report.diagnostics, buildDiagnostics(p, runs, facts))
+      )
+        fail("DIAGNOSTIC_REPORT", "报告稳健性结果与真实实验不一致");
+      if (p.protocol.robustness) {
+        const synthetic = datasets.some(
+          (d) => p.datasetIds.includes(d.id) && d.synthetic,
+        );
+        if (
+          report.synthetic !== synthetic ||
+          report.conclusion !== researchConclusion(p, synthetic) ||
+          report.selectedCandidateId !== p.selectedCandidateId
+        )
+          fail("DIAGNOSTIC_REPORT", "稳健性报告结论与冻结协议不一致");
+      }
+      if (!p.protocol.robustness && report.diagnostics)
+        fail("DIAGNOSTIC_PROTOCOL", "报告包含未授权的稳健性结果");
       p.report = report;
     } else if (p.status === "completed")
       fail("PROJECT_REPORT", "已交付研究缺少报告");

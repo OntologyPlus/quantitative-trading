@@ -131,9 +131,17 @@ export function apply(ctx: Context) {
   );
   register(
     "qt_monitor_read",
-    "读取模拟运行健康、异常通知与确定性事实复盘",
-    {},
-    () => q.monitor.list(),
+    "读取模拟运行健康与事实复盘；id指定冻结复盘，path核对其数值证据。只读，不改变策略或运行状态",
+    { id: { type: "string" }, path: { type: "string" } },
+    (args) => {
+      const x = z
+        .object({ id: id.optional(), path: z.string().max(200).optional() })
+        .strict()
+        .parse(args);
+      if (x.path && !x.id)
+        fail("SIMULATION_EVIDENCE", "核对复盘证据时需要复盘id");
+      return x.id ? q.monitor.read(x) : q.monitor.list();
+    },
   );
   register(
     "qt_status",

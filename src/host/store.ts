@@ -125,7 +125,11 @@ export class Store {
     ).map((x) => this.hydrate(kind, JSON.parse(x.body)) as T);
   }
   private hydrate(kind: string, value: any) {
-    if (kind !== "run" || !value.resultArtifact) return value;
+    if (
+      !["run", "simulationCheckpoint"].includes(kind) ||
+      !value.resultArtifact
+    )
+      return value;
     if (!/^[a-f0-9]{64}$/.test(value.resultArtifact))
       fail("INVALID_ARTIFACT", "回测产物身份无效");
     const text = readFileSync(
@@ -139,7 +143,11 @@ export class Store {
   }
   private serialize(kind: string, value: unknown) {
     const record = value as any;
-    if (kind !== "run" || !record.result?.state) return JSON.stringify(value);
+    if (
+      !["run", "simulationCheckpoint"].includes(kind) ||
+      !record.result?.state
+    )
+      return JSON.stringify(value);
     const text = JSON.stringify(record.result),
       digest = hash(text),
       path = join(this.resultDirectory, `${digest}.json`);

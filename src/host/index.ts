@@ -162,12 +162,46 @@ export default class QuantService extends Service {
         return this.projects.control(input);
       case "project-approve":
         return this.projects.approve(input);
+      case "project-promotion-preview":
+        return this.projects.promotionPreview(input);
       case "project-answer":
         return this.projects.answer(input);
       case "monitor-list":
         return this.monitor.list(input);
       case "monitor-config":
         return this.monitor.config(input);
+      case "monitor-review":
+        return this.monitor.review(input);
+      case "monitor-read":
+        return this.monitor.read(input);
+      case "monitor-followup": {
+        const x = z
+          .object({
+            submissionId: id,
+            id,
+            reviewHash: z.string(),
+            questionCode: z.string().max(100),
+          })
+          .strict()
+          .parse(input);
+        return r.store.submit(
+          x.submissionId,
+          "monitor-followup",
+          { x, sessionId },
+          () =>
+            this.projects.create(
+              {
+                submissionId: `followup-${x.submissionId}`,
+                ...this.monitor.followupInput({
+                  reviewId: x.id,
+                  reviewHash: x.reviewHash,
+                  questionCode: x.questionCode,
+                }),
+              },
+              sessionId,
+            ),
+        );
+      }
       case "notice-ack":
         return this.monitor.acknowledge(input);
       case "project-export": {

@@ -170,6 +170,7 @@ export function Studio({
     lock = useRef(false),
     submissions = useRef(new Map<string, string>());
   const [strategyId, setStrategyId] = useState(""),
+    [openProjectId, setOpenProjectId] = useState<string | undefined>(),
     [datasetIds, setDatasetIds] = useState<string[]>([]),
     [runId, setRunId] = useState(""),
     [detail, setDetail] = useState<RunRecord | null>(null),
@@ -572,6 +573,8 @@ export function Studio({
               sessionId={sessionId}
               visible={visible}
               datasets={snap.datasets}
+              {...(openProjectId ? { initialProjectId: openProjectId } : {})}
+              onPaper={() => setTab("paper")}
               bring={bring}
               onRun={(id) => {
                 chooseRun(id);
@@ -1274,6 +1277,10 @@ export function Studio({
               sessionId={sessionId}
               visible={visible}
               bring={bring}
+              onProject={(id) => {
+                setOpenProjectId(id);
+                setTab("overview");
+              }}
             />
             <section className="card">
               <h2>创建模拟账户</h2>
