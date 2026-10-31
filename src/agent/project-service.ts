@@ -1,3 +1,4 @@
+import { claimTemplate } from "../research/claims.js";
 import { z } from "zod";
 import { hash } from "../adapters/market.js";
 import { D } from "../engine/core.js";
@@ -975,14 +976,23 @@ export class ProjectService {
         if (action.action === "analyze") {
           if (p.analyses.length >= 20)
             fail("ANALYSIS_LIMIT", "本项目最多保存20项解释或假设");
+          if (
+            p.protocol.acceptance &&
+            action.kind === "interpretation" &&
+            !action.claims
+          )
+            fail(
+              "CLAIM_MISSING",
+              "此协议的事实解释需要claims结构化比较；未经验证的解释请标为hypothesis",
+            );
+          const template = action.claims
+            ? claimTemplate(action.claims, this.facts(p), action.evidenceIds)
+            : action.text;
           p.analyses.push({
+            ...(action.claims ? { claims: action.claims } : {}),
             kind: action.kind,
-            text: renderAnalysis(
-              action.text,
-              this.facts(p),
-              action.evidenceIds,
-            ),
-            template: action.text,
+            text: renderAnalysis(template, this.facts(p), action.evidenceIds),
+            template,
             evidenceIds: action.evidenceIds,
             author: "ai",
             at: at(),
@@ -1127,13 +1137,34 @@ export class ProjectService {
       const run = this.store.get<RunRecord>("run", experiment.runId);
       verifyRun(run);
       if (
-        p.protocol.robustness &&
+        (p.protocol.robustness || p.protocol.acceptance) &&
         (!isDeepStrictEqual(experiment.metrics, run.result!.metrics) ||
           !isDeepStrictEqual(experiment.evaluation, evaluate(p, run)))
       )
         fail("DIAGNOSTIC_EVIDENCE", "稳健性研究的评估摘要与真实结果不一致");
       for (const ref of p.report.facts.filter((f) => f.runId === run.id))
         verifyEvidence(ref, run, false);
+    }
+    if (p.protocol.acceptance) {
+      const facts = this.facts(p),
+        synthetic = this.validateDatasets(p, true).some((d) => d.synthetic);
+      if (
+        hash(p.protocol) !== p.protocolHash ||
+        !isDeepStrictEqual(p.report.facts, facts) ||
+        !isDeepStrictEqual(p.report.analyses, p.analyses) ||
+        p.report.conclusion !== researchConclusion(p, synthetic) ||
+        p.report.synthetic !== synthetic
+      )
+        fail("ACCEPTANCE_REPORT", "明确目标报告与协议或事实不一致");
+      for (const a of p.analyses) {
+        if (a.kind === "interpretation" && !a.claims)
+          fail("CLAIM_MISSING", "事实解释缺少可核对判断");
+        const template = a.claims
+          ? claimTemplate(a.claims, facts, a.evidenceIds)
+          : (a.template ?? a.text);
+        if (renderAnalysis(template, facts, a.evidenceIds) !== a.text)
+          fail("CLAIM_FALSE", "报告解释与证据不一致");
+      }
     }
     if (p.protocol.robustness) {
       const synthetic = this.validateDatasets(p, true).some((d) => d.synthetic);
@@ -1204,23 +1235,51 @@ export class ProjectService {
     });
   }
   private priorExposures(p: ResearchProject) {
-    return this.store
-      .page<ResearchProject>("project", 0, 100000, [
-        "report",
-        "analyses",
-        "experiments",
-      ])
-      .filter(
-        (other) =>
-          other.id !== p.id &&
-          other.holdoutRevealedAt &&
-          other.protocol.interval === p.protocol.interval &&
-          other.protocol.symbols.some((s) => p.protocol.symbols.includes(s)) &&
-          other.ranges.holdout.from <= p.ranges.holdout.to &&
-          other.ranges.holdout.to >= p.ranges.holdout.from,
+    const end = p.ranges.holdout.to + INTERVAL_MS[p.protocol.interval];
+    const exposures = new Set<string>();
+    for (const other of this.store.page<ResearchProject>("project", 0, 100000, [
+      "report",
+      "analyses",
+    ])) {
+      if (
+        other.id === p.id ||
+        !other.protocol.symbols.some((s) => p.protocol.symbols.includes(s))
       )
-      .map((other) => other.id);
+        continue;
+      for (const e of other.experiments) {
+        if (e.status !== "completed") continue;
+        if (
+          e.from < end &&
+          e.to + INTERVAL_MS[other.protocol.interval] > p.ranges.holdout.from
+        )
+          exposures.add(other.id);
+      }
+      if (
+        other.holdoutRevealedAt &&
+        other.ranges.holdout.from < end &&
+        other.ranges.holdout.to + INTERVAL_MS[other.protocol.interval] >
+          p.ranges.holdout.from
+      )
+        exposures.add(other.id);
+    }
+    for (const run of this.store.page<RunRecord>("run", 0, 100000, [
+      "result",
+    ])) {
+      if (run.projectId || run.status !== "completed") continue;
+      const strategy = this.store.get<StrategyRecord>(
+        "strategy",
+        run.strategyId,
+      ).definition;
+      if (
+        strategy.symbols.some((s) => p.protocol.symbols.includes(s)) &&
+        run.config.from < end &&
+        run.config.to + INTERVAL_MS[strategy.interval] > p.ranges.holdout.from
+      )
+        exposures.add(run.id);
+    }
+    return [...exposures].sort();
   }
+
   list(input: unknown = {}) {
     this.leaseValid();
     const x = z

@@ -498,6 +498,59 @@ await withHarness(async ({ base, cookie, rpc, temp, root }) => {
         "base64",
       ),
     );
+    const listed = await rpc("project-list", { limit: 20 });
+    const source = listed.projects.find((p) => p.status === "completed");
+    assert.ok(source, "Completed project for enhanced research checks");
+    const detail = await rpc("project-read", { id: source.id });
+    const developments = detail.project.experiments
+      .filter((e) => e.phase === "development" && e.status === "completed")
+      .slice(0, 2);
+    assert.equal(developments.length, 2);
+    const quality = await rpc("research-quality", {
+      runId: developments[0].runId,
+    });
+    assert.ok(quality.hash);
+    const audit = await rpc("data-audit", {
+      datasetIds: detail.project.datasetIds,
+    });
+    assert.ok(audit.hash);
+    const universe = await rpc("universe-asof", {
+      datasetIds: detail.project.datasetIds,
+      asOf: Date.now(),
+    });
+    assert.ok(universe.rows.every((r) => !r.eligible));
+    const combined = await rpc("portfolio-backtest", {
+      legs: developments.map((e) => ({ runId: e.runId, weightPct: 50 })),
+      initialCash: "10000",
+      rebalance: "daily",
+    });
+    assert.ok(combined.hash);
+    assert.equal(combined.sleeves.length, 2);
+    await click("研究委托");
+    await wait("document.body.innerText.includes('研究增强实验室')");
+    await new Promise((r) => setTimeout(r, 1200));
+    await evaluate(
+      "(()=>{const d=[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='研究增强实验室');d.open=true;d.scrollIntoView({behavior:'instant',block:'start'});})()",
+    );
+    assert.ok(
+      await evaluate(
+        "document.documentElement.scrollWidth<=window.innerWidth+1",
+      ),
+      "Enhanced research panel overflows mobile viewport",
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    writeFileSync(
+      join(out, "enhancements-mobile.png"),
+      Buffer.from(
+        (
+          await send("Page.captureScreenshot", {
+            format: "png",
+            captureBeyondViewport: false,
+          })
+        ).data,
+        "base64",
+      ),
+    );
     assert.equal(exceptions.length, 0, exceptions.join("\n"));
     console.log(
       "Chrome desktop/mobile, authenticated research, robust diagnostics, frozen simulation evidence, linked draft, approved account replacement and disconnect recovery: PASS",

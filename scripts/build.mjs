@@ -13,6 +13,8 @@ const engineHash = createHash("sha256")
   .update(
     [
       "src/engine/core.ts",
+      "src/domain/conditions.ts",
+      "src/engine/portfolio.ts",
       "src/engine/backtest.ts",
       "src/domain/contracts.ts",
       "src/domain/schemas.ts",

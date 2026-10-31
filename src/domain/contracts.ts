@@ -16,6 +16,7 @@ export interface Bar {
 }
 export interface Strategy {
   template: "sma_cross" | "breakout";
+  conditions?: import("./conditions.js").Conditions | undefined;
   symbols: string[];
   interval: Interval;
   fast: number;
@@ -55,6 +56,10 @@ export const DEFAULT_RULES: Rules = {
   tickSize: "0.01",
 };
 export interface RunConfig {
+  ruleHistory?: Record<
+    string,
+    { effectiveAt: number; knownAt: number; rules: Rules }[]
+  >;
   initialCash: string;
   risk: Risk;
   costs: Costs;
@@ -156,6 +161,7 @@ export interface RunResult {
   hash: string;
 }
 export interface Dataset {
+  provenance?: import("./provenance.js").Provenance;
   id: string;
   name: string;
   symbol: string;

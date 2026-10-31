@@ -1,3 +1,6 @@
+import { provenanceSchema } from "../domain/provenance.js";
+import { strategySchema } from "../domain/schemas.js";
+import { ResearchLab } from "./lab.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UseSidebarRightTabInfo } from "@deepseek-ai/dsh-client-ui-sidebar-right/client";
 import type {
@@ -188,6 +191,30 @@ export function Studio({
       id: string;
       revision: number;
     } | null>(null);
+  const [provenanceText, setProvenanceText] = useState(""),
+    [forceRefresh, setForceRefresh] = useState(false);
+  let parsedProvenance: Dataset["provenance"];
+  let provenanceError = "";
+  try {
+    if (provenanceText.trim())
+      parsedProvenance = provenanceSchema.parse(JSON.parse(provenanceText));
+  } catch {
+    provenanceError = "数据来源记录格式无效";
+  }
+  const [conditionText, setConditionText] = useState("");
+  let parsedConditions: StrategyRecord["definition"]["conditions"];
+  let conditionError = "";
+  try {
+    if (conditionText.trim())
+      parsedConditions = strategySchema.parse({
+        template,
+        symbols: ["BTCUSDT"],
+        interval: "1h",
+        conditions: JSON.parse(conditionText),
+      }).conditions;
+  } catch {
+    conditionError = "条件格式无效，请按示例检查。";
+  }
   const [cash, setCash] = useState("10000"),
     [risk, setRisk] = useState(defaultRisk),
     [costs, setCosts] = useState(defaultCosts),
@@ -367,6 +394,11 @@ export function Studio({
     setSlow(s.definition.slow);
     setEntry(s.definition.entryPeriod);
     setExit(s.definition.exitPeriod);
+    setConditionText(
+      s.definition.conditions
+        ? JSON.stringify(s.definition.conditions, null, 2)
+        : "",
+    );
     setEditing(s.published ? null : { id: s.id, revision: s.revision });
     setTab("strategy");
   }
@@ -581,6 +613,7 @@ export function Studio({
                 setTab("backtest");
               }}
             />
+            <ResearchLab rpc={rpc} sessionId={sessionId} />
             <details className="advanced-tools">
               <summary>高级研究工具、示例与数据管理</summary>
               <div className="card">
@@ -784,13 +817,60 @@ export function Studio({
                   </label>
                 ))}
               </div>
+              <details>
+                <summary>组合条件与高周期确认</summary>
+                <p>
+                  entry/exit各自全部满足。filter为模板增加入场过滤；replace使用条件入场与退出。close_sma为价格/前期均价，volume_ratio为成交量/前期均量，return_pct为区间涨跌%。factor为UTC对齐的基础周期倍数，只读取完整桶。
+                </p>
+                <textarea
+                  aria-label="策略组合条件"
+                  rows={9}
+                  value={conditionText}
+                  onChange={(e) => setConditionText(e.target.value)}
+                />
+                <button
+                  onClick={() =>
+                    setConditionText(
+                      JSON.stringify(
+                        {
+                          version: 1,
+                          mode: "filter",
+                          entry: [
+                            {
+                              indicator: "close_sma",
+                              period: 20,
+                              factor: 4,
+                              operator: "gt",
+                              value: "1",
+                            },
+                          ],
+                          exit: [
+                            {
+                              indicator: "return_pct",
+                              period: 5,
+                              factor: 1,
+                              operator: "lt",
+                              value: "-3",
+                            },
+                          ],
+                        },
+                        null,
+                        2,
+                      ),
+                    )
+                  }
+                >
+                  填入高周期趋势示例
+                </button>
+                {conditionError && <p role="alert">{conditionError}</p>}
+              </details>
               <p className="hint">
                 信号仅使用已收盘数据；回测最早下一根开盘成交。突破区间排除当前 K
                 线。参数尚未经过有效性验证。
               </p>
               <button
                 className="primary"
-                disabled={busy}
+                disabled={busy || !!conditionError}
                 onClick={() =>
                   void act<StrategyRecord>(
                     "draft",
@@ -806,6 +886,9 @@ export function Studio({
                         slow,
                         entryPeriod: entry,
                         exitPeriod: exit,
+                        ...(parsedConditions
+                          ? { conditions: parsedConditions }
+                          : {}),
                       },
                     },
                     (s) => {
@@ -919,6 +1002,7 @@ export function Studio({
                   void act("prepare", {
                     symbol: dataSymbol,
                     interval: dataInterval,
+                    refresh: forceRefresh,
                     from: new Date(from).getTime(),
                     to: new Date(to).getTime(),
                   })
@@ -926,6 +1010,27 @@ export function Studio({
               >
                 提交公共行情下载
               </button>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={forceRefresh}
+                  onChange={(e) => setForceRefresh(e.target.checked)}
+                />
+                强制重新抓取（默认复用完整快照或增量下载）
+              </label>
+              <details>
+                <summary>CSV来源、修订及历史规则</summary>
+                <p>
+                  可提供version、provider、retrievedAt、revisionOf、listing与ruleHistory。时间为UTC毫秒，规则包含effectiveAt和knownAt；缺少覆盖时不使用未来规则。
+                </p>
+                <textarea
+                  aria-label="数据来源记录"
+                  rows={8}
+                  value={provenanceText}
+                  onChange={(e) => setProvenanceText(e.target.value)}
+                />
+                {provenanceError && <p role="alert">{provenanceError}</p>}
+              </details>
               <div className="rule" />
               <label>
                 或导入 CSV（最大 64 MB）
@@ -933,7 +1038,7 @@ export function Studio({
                   className="file"
                   type="file"
                   accept=".csv"
-                  disabled={busy}
+                  disabled={busy || !!provenanceError}
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     if (!f) return;
@@ -949,6 +1054,9 @@ export function Studio({
                           symbol: dataSymbol,
                           interval: dataInterval,
                           csv,
+                          ...(parsedProvenance
+                            ? { provenance: parsedProvenance }
+                            : {}),
                         }),
                       )
                       .catch((e) => setError(e.message));
@@ -1008,6 +1116,15 @@ export function Studio({
                     规则快照：{d.ruleAsOf}
                   </p>
                   <pre>{JSON.stringify(d.rules, null, 2)}</pre>
+                  <pre
+                    style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+                  >
+                    {JSON.stringify(
+                      d.provenance ?? { warning: "缺少结构化来源记录" },
+                      null,
+                      2,
+                    )}
+                  </pre>
                 </details>
               </section>
             ))}

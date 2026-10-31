@@ -1,3 +1,4 @@
+import { labAction } from "./lab.js";
 import { Service, type Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
@@ -152,6 +153,13 @@ export default class QuantService extends Service {
   ): Promise<unknown> {
     const r = this.research;
     switch (action) {
+      case "research-quality":
+      case "portfolio-research":
+      case "portfolio-backtest":
+      case "data-audit":
+      case "universe-asof":
+      case "simulation-replay":
+        return labAction(r, action, input);
       case "project-create":
         return this.projects.create(input, sessionId);
       case "project-list":

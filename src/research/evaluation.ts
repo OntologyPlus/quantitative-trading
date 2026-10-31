@@ -1,3 +1,5 @@
+import { researchQuality } from "./quality.js";
+import { INTERVAL_MS } from "../domain/contracts.js";
 import { hash } from "../adapters/market.js";
 import { D, assertLedger } from "../engine/core.js";
 import { fail } from "../domain/schemas.js";
@@ -27,6 +29,27 @@ export function evaluate(project: ResearchProject, run: RunRecord): Evaluation {
   const m = run.result.metrics,
     t = project.protocol.thresholds;
   const reasons: Evaluation["reasons"] = [];
+  const acceptance = project.protocol.acceptance;
+  if (acceptance) {
+    const days =
+      (run.config.to -
+        run.config.from +
+        INTERVAL_MS[project.protocol.interval]) /
+      86400000;
+    if (days < acceptance.minDays)
+      reasons.push({
+        code: "DURATION_INSUFFICIENT",
+        message: "评估跨度低于冻结的最少天数",
+      });
+    if (
+      acceptance.minReturnPct !== undefined &&
+      D(m.returnPct).lt(acceptance.minReturnPct)
+    )
+      reasons.push({
+        code: "ABSOLUTE_RETURN",
+        message: "绝对收益未达到冻结目标",
+      });
+  }
   if (m.closedTrades < t.minClosedTrades)
     reasons.push({
       code: "SAMPLE_INSUFFICIENT",
@@ -39,14 +62,20 @@ export function evaluate(project: ResearchProject, run: RunRecord): Evaluation {
     });
   if (
     D(m.returnPct)
-      .minus(run.result.benchmarks.buyHoldReturnPct)
+      .minus(
+        acceptance?.benchmark === "cash"
+          ? run.result.benchmarks.cashReturnPct
+          : run.result.benchmarks.buyHoldReturnPct,
+      )
       .lt(t.minExcessReturnPct)
   )
     reasons.push({
       code: "BASELINE_UNDERPERFORMANCE",
-      message: `相对买入持有的超额收益低于协议要求 ${t.minExcessReturnPct}%`,
+      message: `相对${acceptance?.benchmark === "cash" ? "现金" : "买入持有"}的超额收益低于协议要求 ${t.minExcessReturnPct}%`,
     });
-  const hardFailure = reasons.some((r) => r.code !== "SAMPLE_INSUFFICIENT");
+  const hardFailure = reasons.some(
+    (r) => !["SAMPLE_INSUFFICIENT", "DURATION_INSUFFICIENT"].includes(r.code),
+  );
   return {
     verdict: hardFailure ? "fail" : reasons.length ? "insufficient" : "pass",
     reasons,
@@ -67,6 +96,22 @@ export function resolveValue(
   run: RunRecord,
   path: string,
 ): string | number | null {
+  if (
+    path.startsWith("uncertainty.") &&
+    run.result &&
+    run.status === "completed"
+  ) {
+    const quality = researchQuality(run, 1),
+      range = quality.meanDailyReturnIntervalPct;
+    const values: Record<string, number | null> = {
+      "uncertainty.dailySamples": quality.dailySamples,
+      "uncertainty.meanDailyReturnLowerPct": range?.[0] ?? null,
+      "uncertainty.meanDailyReturnUpperPct": range?.[1] ?? null,
+    };
+    if (!Object.hasOwn(values, path))
+      fail("EVIDENCE_PATH", "不确定性证据字段不存在");
+    return values[path]!;
+  }
   if (
     path.startsWith("attribution.") &&
     run.result &&
@@ -96,7 +141,15 @@ export function evidence(
     project.protocol.robustness && experiment.phase === "holdout"
       ? attributionValues(run)
       : {};
-  return [...paths, ...Object.keys(derived)].map((path) => ({
+  const uncertainty =
+    project.protocol.acceptance && experiment.phase === "holdout"
+      ? [
+          "uncertainty.dailySamples",
+          "uncertainty.meanDailyReturnLowerPct",
+          "uncertainty.meanDailyReturnUpperPct",
+        ]
+      : [];
+  return [...paths, ...Object.keys(derived), ...uncertainty].map((path) => ({
     id: hash({ project: project.id, experiment: experiment.id, path }).slice(
       0,
       40,
@@ -248,10 +301,18 @@ export function makeReport(
       )
       .map((c) => `${c.label}：${c.value}。`),
     "固定现货交易对池、只做多、K线级成本与成交模型；不代表真实可成交收益。",
-    "交易规则取自当前快照，未还原全部历史规则；期末持仓按收盘估值。",
+    datasets.some((d) => d.provenance?.ruleHistory?.length)
+      ? "已提供规则档案的市场按生效和已知时间应用历史规则，其余仍按快照近似；来源真实性未独立认证；期末持仓按收盘估值。"
+      : "交易规则取自当前快照，未还原全部历史规则；期末持仓按收盘估值。",
     "买入持有基准使用等权初始配置并计入建仓成本，期末按市值估值；不假设自动平仓。",
     "开发和验证区间用于候选选择，最终保留区间仅在选定候选后揭示；再次使用本区间不能称为新的盲测。",
     "多个候选、有限参数邻域和时间切分不能消除过拟合；没有通用盈利保证。",
+    ...(p.protocol.acceptance
+      ? [
+          `明确验收目标：基准${p.protocol.acceptance.benchmark}；最低绝对收益${p.protocol.acceptance.minReturnPct ?? "未设"}%；每项评估最少${p.protocol.acceptance.minDays}天。`,
+          `本项目尝试${p.candidates.length}个候选；最终区间日均收益区间采用固定种子的500次区块重采样，至少30个连续日收益；不是未来收益概率，未作多重筛选校正。`,
+        ]
+      : []),
     ...(diagnostics?.limitations ?? []),
     ...(synthetic ? ["所有结果包含合成演示数据，不是市场实绩。"] : []),
     ...(p.protocol.mode === "protocol"

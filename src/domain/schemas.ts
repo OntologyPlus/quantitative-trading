@@ -5,9 +5,31 @@ export const positive = decimal.refine((v) => Number(v) > 0);
 const pct = decimal.refine((v) => Number(v) <= 100);
 export const symbol = z.string().regex(/^[A-Z0-9]{2,20}USDT$/);
 export const interval = z.enum(["1m", "15m", "1h", "1d"]);
+const conditionSchema = z
+  .object({
+    indicator: z.enum(["close_sma", "volume_ratio", "return_pct"]),
+    period: z.number().int().min(2).max(1000),
+    factor: z.number().int().min(1).max(48),
+    operator: z.enum(["gt", "lt"]),
+    value: z
+      .string()
+      .regex(/^-?\d+(\.\d+)?$/)
+      .max(32),
+  })
+  .strict()
+  .refine((c) => (c.period + 2) * c.factor - 1 <= 2002, "条件预热最多2002根");
 export const strategySchema = z
   .object({
     template: z.enum(["sma_cross", "breakout"]),
+    conditions: z
+      .object({
+        version: z.literal(1),
+        mode: z.enum(["filter", "replace"]),
+        entry: z.array(conditionSchema).min(1).max(8),
+        exit: z.array(conditionSchema).min(1).max(8),
+      })
+      .strict()
+      .optional(),
     symbols: z
       .array(symbol)
       .min(1)

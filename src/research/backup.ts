@@ -1,3 +1,4 @@
+import { claimSchema, claimTemplate } from "./claims.js";
 import { z } from "zod";
 import { isDeepStrictEqual } from "node:util";
 import { hash } from "../adapters/market.js";
@@ -134,6 +135,7 @@ const projectShape = z
             author: z.literal("ai"),
             at: z.string(),
             template: z.string().max(3000).optional(),
+            claims: z.array(claimSchema).min(1).max(10).optional(),
           })
           .strict(),
       )
@@ -248,9 +250,20 @@ export function validateProjects(
       for (const ref of a.evidenceIds)
         if (!facts.some((e) => e.id === ref))
           fail("BROKEN_REFERENCE", "研究解释的证据引用无效");
-    for (const a of p.analyses)
-      if (renderAnalysis(a.template ?? a.text, facts, a.evidenceIds) !== a.text)
+    for (const a of p.analyses) {
+      if (p.protocol.acceptance && a.kind === "interpretation" && !a.claims)
+        fail("CLAIM_MISSING", "明确目标报告缺少结构化事实判断");
+      if (
+        renderAnalysis(
+          a.claims
+            ? claimTemplate(a.claims, facts, a.evidenceIds)
+            : (a.template ?? a.text),
+          facts,
+          a.evidenceIds,
+        ) !== a.text
+      )
         fail("PROJECT_EVIDENCE", "解释中的数值与证据不一致");
+    }
     verifyDiagnosticRuns(p, runs, strategies, p.status === "completed");
     if (v.report) {
       const report = z
@@ -297,7 +310,7 @@ export function validateProjects(
         !isDeepStrictEqual(report.diagnostics, buildDiagnostics(p, runs, facts))
       )
         fail("DIAGNOSTIC_REPORT", "报告稳健性结果与真实实验不一致");
-      if (p.protocol.robustness) {
+      if (p.protocol.robustness || p.protocol.acceptance) {
         const synthetic = datasets.some(
           (d) => p.datasetIds.includes(d.id) && d.synthetic,
         );

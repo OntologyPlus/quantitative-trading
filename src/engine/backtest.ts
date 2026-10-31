@@ -27,7 +27,23 @@ export function backtest(
       group: Bar[] = [];
     while (i < sorted.length && sorted[i]!.time === time)
       group.push(sorted[i++]!);
-    if (time <= config.to) ingestBatch(st, strategy, config, group);
+    if (time <= config.to) {
+      let activeConfig = config;
+      if (config.ruleHistory && time >= config.from) {
+        const rules = { ...config.rules };
+        for (const symbol of strategy.symbols) {
+          const history = config.ruleHistory[symbol];
+          if (!history?.length) continue;
+          const active = history
+            .filter((r) => r.effectiveAt <= time && r.knownAt <= time)
+            .at(-1);
+          if (!active) throw Error("历史规则未覆盖当前时点，拒绝使用未来规则");
+          rules[symbol] = active.rules;
+        }
+        activeConfig = { ...config, rules };
+      }
+      ingestBatch(st, strategy, activeConfig, group);
+    }
   }
   // The final close may create an intent, but there is no subsequent observation to fill it.
   for (const order of Object.values(st.pending))

@@ -1,3 +1,4 @@
+import { provenanceSchema } from "../domain/provenance.js";
 import { z } from "zod";
 import { hash, validateBars } from "../adapters/market.js";
 import type {
@@ -160,6 +161,7 @@ export function restoreBackup(r: Research, input: unknown) {
           createdAt: z.string(),
           rules: rulesSchema,
           ruleAsOf: z.string(),
+          provenance: provenanceSchema.optional(),
           quality: z.object({
             gaps: z.literal(0),
             duplicates: z.literal(0),
@@ -227,6 +229,9 @@ export function restoreBackup(r: Research, input: unknown) {
   }
   const configSchema = configInput.extend({
     rules: z.record(z.string(), rulesSchema),
+    ruleHistory: z
+      .record(z.string(), provenanceSchema.shape.ruleHistory.unwrap())
+      .optional(),
     engineVersion: z.string().min(1),
   });
   const accounts = b.objects.account.map(
@@ -367,6 +372,7 @@ export function restoreBackup(r: Research, input: unknown) {
         progress: z.number().min(0).max(100),
         error: z.string(),
         datasetId: z.string().max(100),
+        refresh: z.boolean().optional(),
         createdAt: z.string(),
       })
       .strict()

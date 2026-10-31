@@ -4,6 +4,12 @@ import { z } from "zod";
 import { id, parseError } from "../domain/schemas.js";
 import type {} from "./index.js";
 export const ACTIONS = [
+  "universe-asof",
+  "portfolio-backtest",
+  "research-quality",
+  "portfolio-research",
+  "data-audit",
+  "simulation-replay",
   "snapshot",
   "demo",
   "import",

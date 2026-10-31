@@ -49,6 +49,7 @@ npm run pack
 - [Agent 实施与验收记录](docs/Agent实施与验收记录.md)
 - [Agent 产品化规划](docs/Agent产品化规划.md)
 - [使用说明](docs/使用说明.md)
+- [研究能力增强实施记录](docs/研究能力增强实施记录.md)
 - [常驻运行与质量验证](docs/常驻运行与质量验证.md)
 - [开发方案 v0.1](docs/量化交易助手开发方案.md)
 - [实施与验证记录](docs/实施与验证记录.md)

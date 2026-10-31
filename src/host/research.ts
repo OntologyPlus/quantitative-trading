@@ -1,3 +1,4 @@
+import { provenanceSchema } from "../domain/provenance.js";
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
@@ -36,6 +37,7 @@ import { ENGINE_VERSION } from "../engine/backtest.js";
 import { assertLedger, initialState } from "../engine/core.js";
 import { observationEvent } from "./observation.js";
 export interface DataJob {
+  refresh?: boolean | undefined;
   id: string;
   symbol: string;
   interval: import("../domain/contracts.js").Interval;
@@ -127,6 +129,7 @@ export class Research {
       createdAt: at(),
       rules,
       ruleAsOf: at(),
+      provenance: { version: 1, provider: source, retrievedAt: Date.now() },
       quality: { gaps: 0, duplicates: 0, valid: true },
       synthetic: syntheticFlag,
     };
@@ -141,18 +144,29 @@ export class Research {
         symbol,
         interval,
         csv: z.string().max(64 * 1024 * 1024),
+        provenance: provenanceSchema.optional(),
       })
       .strict()
       .parse(input);
-    return this.store.submit(x.submissionId, "import", x, () =>
-      this.saveDataset(
+    return this.store.submit(x.submissionId, "import", x, () => {
+      if (x.provenance?.revisionOf) {
+        const old = this.store.get<Dataset>("dataset", x.provenance.revisionOf);
+        if (old.symbol !== x.symbol || old.interval !== x.interval)
+          fail("REVISION_SOURCE", "修订来源须为同一交易对和周期");
+      }
+      const record = this.saveDataset(
         x.name,
         x.symbol,
         x.interval,
         "用户 CSV；交易规则为近似默认值",
         parseCSV(x.csv, x.symbol),
-      ),
-    );
+      );
+      if (x.provenance) {
+        record.provenance = x.provenance;
+        this.store.put("dataset", record.id, record);
+      }
+      return record;
+    });
   }
   demo(input: unknown) {
     const x = z.object({ submissionId: id }).strict().parse(input);
@@ -282,6 +296,12 @@ export class Research {
           { ...x.config, from, to },
           Object.fromEntries(datasets.map((d) => [d.symbol, d.rules])),
         );
+        const ruleHistory = Object.fromEntries(
+          datasets
+            .filter((d) => d.provenance?.ruleHistory?.length)
+            .map((d) => [d.symbol, d.provenance!.ruleHistory!]),
+        );
+        if (Object.keys(ruleHistory).length) config.ruleHistory = ruleHistory;
         const record: RunRecord = {
           id: uid(),
           strategyId: strategy.id,
@@ -316,6 +336,7 @@ export class Research {
         submissionId: id,
         symbol,
         interval,
+        refresh: z.boolean().optional(),
         from: z.number().int().nonnegative(),
         to: z.number().int().positive(),
       })
@@ -339,6 +360,25 @@ export class Research {
         datasetId: "",
         createdAt: at(),
       };
+      if (!x.refresh) {
+        const cached = this.store
+          .list<Dataset>("dataset")
+          .find(
+            (d) =>
+              !d.synthetic &&
+              d.source === "Binance public market data" &&
+              d.symbol === x.symbol &&
+              d.interval === x.interval &&
+              d.from <= x.from &&
+              d.to >= x.to,
+          );
+        if (cached) {
+          this.bars(cached);
+          job.datasetId = cached.id;
+          job.status = "completed";
+          job.progress = 100;
+        }
+      }
       this.store.put("dataJob", job.id, job);
       return job;
     });
@@ -361,10 +401,31 @@ export class Research {
         const list = await symbols(this.dataAbort.signal),
           rule = list.find((s) => s.symbol === data.symbol)?.rules;
         if (!rule) fail("SYMBOL_UNSUPPORTED", "该现货交易对不受支持");
-        const bars = await download(
+        const cached = !data.refresh
+          ? this.store
+              .list<Dataset>("dataset")
+              .find(
+                (d) =>
+                  !d.synthetic &&
+                  d.source === "Binance public market data" &&
+                  d.symbol === data.symbol &&
+                  d.interval === data.interval &&
+                  d.from <= data.from &&
+                  d.to >= data.from &&
+                  d.to < data.to,
+              )
+          : undefined;
+        const prefix = cached
+          ? this.bars(cached).filter(
+              (b) => b.time >= data.from && b.time <= data.to,
+            )
+          : [];
+        const tail = await download(
           data.symbol,
           data.interval,
-          data.from,
+          prefix.length
+            ? prefix.at(-1)!.time + INTERVAL_MS[data.interval]
+            : data.from,
           data.to,
           this.dataAbort.signal,
           (n) => {
@@ -378,6 +439,7 @@ export class Research {
             }
           },
         );
+        const bars = [...prefix, ...tail];
         if (
           !this.closed &&
           this.store.get<DataJob>("dataJob", data.id).status === "running"

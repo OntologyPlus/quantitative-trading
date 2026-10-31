@@ -1,3 +1,4 @@
+import { conditionMatches, historyRequired } from "../domain/conditions.js";
 import { Decimal } from "decimal.js";
 import { INTERVAL_MS } from "../domain/contracts.js";
 import type {
@@ -302,6 +303,22 @@ export function assertLedger(st: EngineState, initialCash: string) {
       throw Error("基础资产账本不一致");
 }
 function signal(history: Bar[], strategy: Strategy): "BUY" | "SELL" | null {
+  if (strategy.conditions) {
+    const c = strategy.conditions,
+      step = INTERVAL_MS[strategy.interval];
+    const base =
+      c.mode === "filter"
+        ? signal(history, { ...strategy, conditions: undefined })
+        : null;
+    if (
+      base === "SELL" ||
+      c.exit.every((rule) => conditionMatches(history, rule, step))
+    )
+      return "SELL";
+    if (!c.entry.every((rule) => conditionMatches(history, rule, step)))
+      return null;
+    return c.mode === "replace" ? "BUY" : base;
+  }
   const n = history.length,
     last = history[n - 1]!;
   if (strategy.template === "sma_cross") {
@@ -356,11 +373,7 @@ function appendHistory(st: EngineState, strategy: Strategy, bar: Bar) {
   st.lastTime[bar.symbol] = bar.time;
   const history = (st.history[bar.symbol] ??= []);
   history.push(bar);
-  const max = Math.max(
-    strategy.slow + 1,
-    strategy.entryPeriod + 1,
-    strategy.exitPeriod + 1,
-  );
+  const max = historyRequired(strategy);
   if (history.length > max) history.splice(0, history.length - max);
 }
 function decide(st: EngineState, strategy: Strategy, cfg: RunConfig, bar: Bar) {

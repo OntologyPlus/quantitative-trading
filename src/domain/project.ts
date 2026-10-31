@@ -1,3 +1,4 @@
+import { claimSchema } from "../research/claims.js";
 import { z } from "zod";
 import {
   configInput,
@@ -55,6 +56,18 @@ export const projectInput = z
     candidates: z.array(strategySchema).min(1).max(6).optional(),
     mode: z.enum(["agent", "protocol"]).default("agent"),
     robustness: robustnessInput.optional(),
+    acceptance: z
+      .object({
+        version: z.literal(1),
+        benchmark: z.enum(["buy_hold", "cash"]),
+        minReturnPct: z
+          .string()
+          .regex(/^-?\d+(\.\d+)?$/)
+          .optional(),
+        minDays: z.number().int().min(1).max(3650),
+      })
+      .strict()
+      .optional(),
     budget: z
       .object({
         experiments: z.number().int().min(6).max(48).default(12),
@@ -202,6 +215,7 @@ export interface Evaluation {
   reasons: { code: string; message: string }[];
 }
 export interface Analysis {
+  claims?: import("../research/claims.js").Claim[];
   kind: "interpretation" | "hypothesis";
   text: string;
   evidenceIds: string[];
@@ -332,6 +346,7 @@ export const nextAction = z.discriminatedUnion("action", [
       action: z.literal("analyze"),
       kind: z.enum(["interpretation", "hypothesis"]),
       text: z.string().min(1).max(3000),
+      claims: z.array(claimSchema).min(1).max(10).optional(),
       evidenceIds: z.array(id).min(1).max(30),
     })
     .strict(),

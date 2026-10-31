@@ -135,6 +135,16 @@ export function ResearchWorkspace({
     [interval, setIntervalValue] = useState("1h"),
     [mode, setMode] = useState("agent"),
     [datasetIds, setDatasetIds] = useState<string[]>([]);
+  const [candidateText, setCandidateText] = useState("");
+  let customCandidates: ResearchProject["protocol"]["candidates"];
+  let candidateError = "";
+  try {
+    if (candidateText.trim()) customCandidates = JSON.parse(candidateText);
+  } catch {
+    candidateError = "候选策略JSON格式无效";
+  }
+  const [acceptance, setAcceptance] =
+    useState<ResearchProject["protocol"]["acceptance"]>();
   const [parentProjectId, setParentProjectId] = useState<string | undefined>();
   const [robustness, setRobustness] = useState<
     RobustnessProtocol | undefined
@@ -418,6 +428,12 @@ export function ResearchWorkspace({
     setInheritedThresholds(project.protocol.thresholds);
     setResume(project.protocol.resumeOnRestart);
     setRobustness(project.protocol.robustness);
+    setAcceptance(project.protocol.acceptance);
+    setCandidateText(
+      project.protocol.candidates
+        ? JSON.stringify(project.protocol.candidates, null, 2)
+        : "",
+    );
     setCreating(true);
   }
   function askProject(question: string) {
@@ -524,6 +540,8 @@ export function ResearchWorkspace({
                 datasetIds,
                 mode,
                 ...(robustness ? { robustness } : {}),
+                ...(acceptance ? { acceptance } : {}),
+                ...(customCandidates ? { candidates: customCandidates } : {}),
                 budget: {
                   ...inheritedBudget,
                   experiments,
@@ -879,6 +897,84 @@ export function ResearchWorkspace({
             aria-label="委托预检查"
             aria-live="polite"
           >
+            <details>
+              <summary>自定义研究候选（可选）</summary>
+              <p>
+                填写策略定义JSON数组；支持组合条件与高周期确认。留空比较两类默认模板，候选必须匹配本委托的市场和周期；启动前由服务端校验和冻结。
+              </p>
+              <textarea
+                aria-label="自定义研究候选"
+                rows={8}
+                value={candidateText}
+                onChange={(e) => setCandidateText(e.target.value)}
+              />
+              {candidateError && <p role="alert">{candidateError}</p>}
+            </details>
+            <label>
+              <input
+                type="checkbox"
+                checked={!!acceptance}
+                onChange={(e) =>
+                  setAcceptance(
+                    e.target.checked
+                      ? {
+                          version: 1,
+                          benchmark: "buy_hold",
+                          minReturnPct: "0",
+                          minDays: 30,
+                        }
+                      : undefined,
+                  )
+                }
+              />
+              启用明确收益与样本目标
+            </label>
+            {acceptance && (
+              <div className="form-grid">
+                <label>
+                  比较基准
+                  <select
+                    value={acceptance.benchmark}
+                    onChange={(e) =>
+                      setAcceptance({
+                        ...acceptance,
+                        benchmark: e.target.value as "cash" | "buy_hold",
+                      })
+                    }
+                  >
+                    <option value="buy_hold">买入持有</option>
+                    <option value="cash">现金</option>
+                  </select>
+                </label>
+                <label>
+                  最低绝对收益 %
+                  <input
+                    value={acceptance.minReturnPct ?? ""}
+                    onChange={(e) =>
+                      setAcceptance({
+                        ...acceptance,
+                        minReturnPct: e.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  每项评估最少跨度（天）
+                  <input
+                    type="number"
+                    min={1}
+                    max={3650}
+                    value={acceptance.minDays}
+                    onChange={(e) =>
+                      setAcceptance({
+                        ...acceptance,
+                        minDays: Number(e.target.value),
+                      })
+                    }
+                  />
+                </label>
+              </div>
+            )}
             <strong>开始前核对</strong>
             <p>
               系统预填资金、成本和门槛；请按实际研究假设修改。时间统一为 UTC。
@@ -1137,9 +1233,12 @@ export function ResearchWorkspace({
                 <p>
                   门槛：平仓不少于 {p.protocol.thresholds.minClosedTrades}{" "}
                   笔、回撤不超过 {p.protocol.thresholds.maxDrawdownPct}
-                  %、相对买入持有超额收益至少{" "}
-                  {p.protocol.thresholds.minExcessReturnPct}%。压力成本为{" "}
-                  {p.protocol.thresholds.stressMultiplier} 倍。
+                  %、相对
+                  {p.protocol.acceptance?.benchmark === "cash"
+                    ? "现金"
+                    : "买入持有"}
+                  超额收益至少 {p.protocol.thresholds.minExcessReturnPct}
+                  %。压力成本为 {p.protocol.thresholds.stressMultiplier} 倍。
                 </p>
                 <p>
                   研究资金 {p.protocol.config.initialCash} USDT；手续费{" "}

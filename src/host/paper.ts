@@ -1,3 +1,4 @@
+import { historyRequired } from "../domain/conditions.js";
 import { z } from "zod";
 import type { Account, Bar, StrategyRecord } from "../domain/contracts.js";
 import { INTERVAL_MS } from "../domain/contracts.js";
@@ -117,12 +118,7 @@ export class Paper {
       const list = await this.market.symbols(controller.signal),
         step = INTERVAL_MS[strategy.definition.interval],
         to = Math.floor(Date.now() / step) * step - step,
-        n =
-          Math.max(
-            strategy.definition.slow,
-            strategy.definition.entryPeriod,
-            strategy.definition.exitPeriod,
-          ) + 3;
+        n = historyRequired(strategy.definition) + 3;
       const history: Record<string, Bar[]> = {};
       const rules = { ...a.config.rules };
       for (const sym of strategy.definition.symbols) {
@@ -140,13 +136,7 @@ export class Paper {
           history[sym],
           sym,
           strategy.definition.interval,
-        ).slice(
-          -Math.max(
-            strategy.definition.slow + 1,
-            strategy.definition.entryPeriod + 1,
-            strategy.definition.exitPeriod + 1,
-          ),
-        );
+        ).slice(-historyRequired(strategy.definition));
       }
       const value = this.store.submit(
         x.submissionId,
