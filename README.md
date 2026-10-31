@@ -4,7 +4,7 @@
 
 ## 启动
 
-Node.js `>=22.22.0`，Harness 依赖锁定为 `0.2.1-rc.3`。
+Node.js `>=22.22.0`，Harness 依赖锁定为 `0.2.1-rc.5`。
 
 ```sh
 npm run setup
