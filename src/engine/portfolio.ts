@@ -1,3 +1,4 @@
+import { allocateCapital } from "../domain/allocation.js";
 import { z } from "zod";
 import { Decimal } from "decimal.js";
 import { id, fail, positive } from "../domain/schemas.js";
@@ -29,7 +30,11 @@ export const portfolioBacktestInput = z
   .refine(
     (x) =>
       new Set(x.legs.map((l) => l.runId)).size === x.legs.length &&
-      Math.abs(x.legs.reduce((s, l) => s + l.weightPct, 0) - 100) < 1e-8,
+      x.legs
+        .reduce((s, l) => s.plus(String(l.weightPct)), new Decimal(0))
+        .minus(100)
+        .abs()
+        .lt("0.00000001"),
     "组合权重须合计100%且实验不重复",
   );
 export function portfolioBacktest(
@@ -41,10 +46,10 @@ export function portfolioBacktest(
     manifestHash: string;
   }[],
 ) {
+  const weights = protocol.legs.map((l) => l.weightPct);
+  const allocations = allocateCapital(protocol.initialCash, weights);
   const sources = legs.map((l, i) => {
-    const funding = new Decimal(protocol.initialCash)
-      .mul(protocol.legs[i]!.weightPct)
-      .div(100);
+    const funding = allocations[i]!;
     return {
       ...l,
       state: initialState(funding.toFixed()),
@@ -78,7 +83,25 @@ export function portfolioBacktest(
     peak = new Decimal(protocol.initialCash);
   const transfers: { at: number; leg: number; delta: string }[] = [],
     rebalances: { at: number; status: string }[] = [],
-    curve: { at: number; equity: string; drawdownPct: string }[] = [];
+    curve: {
+      at: number;
+      phase: "open" | "close";
+      equity: string;
+      drawdownPct: string;
+    }[] = [];
+  const recordEquity = (at: number, phase: "open" | "close") => {
+    const total = sources.reduce(
+      (s, l) => s.plus(equity(l.state)),
+      new Decimal(0),
+    );
+    peak = Decimal.max(peak, total);
+    curve.push({
+      at,
+      phase,
+      equity: total.toFixed(),
+      drawdownPct: peak.minus(total).div(peak).mul(100).toFixed(),
+    });
+  };
   for (const [at, group] of [...groups].sort((a, b) => a[0] - b[0])) {
     if (at > first.config.to) break;
     for (const l of sources) {
@@ -103,6 +126,7 @@ export function portfolioBacktest(
       }
     }
     if (at >= first.config.from) {
+      recordEquity(at, "open");
       const date = new Date(at).toISOString(),
         next =
           protocol.rebalance === "monthly"
@@ -129,8 +153,9 @@ export function portfolioBacktest(
             (s, l) => s.plus(l.state.cash),
             new Decimal(0),
           );
+          const nextAllocations = allocateCapital(total, weights);
           for (const [i, l] of sources.entries()) {
-            const cash = total.mul(protocol.legs[i]!.weightPct).div(100),
+            const cash = nextAllocations[i]!,
               old = new Decimal(l.state.cash),
               delta = cash.minus(old);
             l.funding = l.funding.plus(delta);
@@ -158,18 +183,11 @@ export function portfolioBacktest(
         l.config,
         l.strategy.symbols.map((s) => group.get(s)!),
       );
-    if (at >= first.config.from) {
-      const total = sources.reduce(
-        (s, l) => s.plus(equity(l.state)),
-        new Decimal(0),
+    if (at >= first.config.from)
+      recordEquity(
+        Math.max(...sources.map((l) => l.state.curve.at(-1)?.at ?? at)),
+        "close",
       );
-      peak = Decimal.max(peak, total);
-      curve.push({
-        at: Math.max(...sources.map((l) => l.state.curve.at(-1)?.at ?? at)),
-        equity: total.toFixed(),
-        drawdownPct: peak.minus(total).div(peak).mul(100).toFixed(),
-      });
-    }
   }
   for (const l of sources) {
     l.state.pending = {};
@@ -206,6 +224,7 @@ export function portfolioBacktest(
       state: l.state,
     })),
     limitations: [
+      "接受的百分比舍入尾差按实际总权重归一化，资金分配尾差归入最后一个子账户；开盘与收盘分别估值，不覆盖同时间戳的不同估值阶段。",
       "资金按策略分为独立子账户，不相互借款；同一标的可以由多个子账户持有。",
       "再平衡在新周期第一根开盘先平仓，再按权重分配现金；使用成分费用、滑点和上一根成交量限额。",
       "任一平仓因流动性受限时，本次不转移资金，已完成的卖出保留；不保证恢复目标权重。",

@@ -67,7 +67,7 @@ test("real Harness agent factory, scoped tools, durable inbox, followup, request
           "qt_project_action",
           "qt_project_context",
         ]);
-        assert.equal(options.maxTokens, 2048);
+        assert.equal(options.maxTokens, 4096);
         const p = q.research.store
           .list<ResearchProject>("project")
           .find((p) => p.executionSessionId === options.sessionId)!;

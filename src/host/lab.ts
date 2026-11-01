@@ -15,9 +15,17 @@ import { hash } from "../adapters/market.js";
 import { backtest, ENGINE_VERSION } from "../engine/backtest.js";
 import { researchQuality } from "../research/quality.js";
 import { portfolioInput, portfolioResearch } from "../research/portfolio.js";
-import type { Research } from "./research.js";
+export interface LabReader {
+  store: {
+    assertLease(): void;
+    get<T>(kind: string, id: string): T;
+    metadata?<T>(kind: string, id: string): T;
+    count(kind: string): number;
+  };
+  bars(dataset: Dataset): import("../domain/contracts.js").Bar[];
+}
 
-export function labAction(r: Research, action: string, input: unknown) {
+export function labAction(r: LabReader, action: string, input: unknown) {
   r.store.assertLease();
   if (action === "research-quality") {
     const x = z.object({ runId: id }).strict().parse(input);
@@ -28,8 +36,23 @@ export function labAction(r: Research, action: string, input: unknown) {
   }
   if (action === "portfolio-backtest") {
     const x = portfolioBacktestInput.parse(input);
-    const legs = x.legs.map((l) => {
-      const run = r.store.get<RunRecord>("run", l.runId);
+    const sourceRuns = x.legs.map((l) =>
+      r.store.metadata
+        ? r.store.metadata<RunRecord>("run", l.runId)
+        : r.store.get<RunRecord>("run", l.runId),
+    );
+    const sources = sourceRuns.map((run) => ({
+      run,
+      datasets: run.datasetIds.map((id) => r.store.get<Dataset>("dataset", id)),
+    }));
+    if (
+      sources.reduce(
+        (n, s) => n + s.datasets.reduce((n, d) => n + d.count, 0),
+        0,
+      ) > 1000000
+    )
+      fail("TOO_LARGE", "组合最多一百万根");
+    const legs = sources.map(({ run, datasets }) => {
       if (
         run.status !== "completed" ||
         run.config.engineVersion !== ENGINE_VERSION
@@ -43,9 +66,7 @@ export function labAction(r: Research, action: string, input: unknown) {
         strategy,
         config: run.config,
         manifestHash: run.manifestHash,
-        bars: run.datasetIds.flatMap((id) =>
-          r.bars(r.store.get<Dataset>("dataset", id)),
-        ),
+        bars: datasets.flatMap((d) => r.bars(d)),
       };
     });
     if (legs.reduce((n, l) => n + l.bars.length, 0) > 1000000)

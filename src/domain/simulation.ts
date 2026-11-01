@@ -162,6 +162,7 @@ export interface ConfigurationChange {
 }
 export interface PromotionPreview {
   version: 1;
+  comparisonVersion?: 2;
   hash: string;
   projectId: string;
   reportHash: string;

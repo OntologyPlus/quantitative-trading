@@ -182,7 +182,7 @@ export class MonitorService {
     const budget = parent?.protocol.budget ?? {
       experiments: 12,
       modelRequests: 20,
-      outputTokens: 2048,
+      outputTokens: 4096,
       maxBars: 100000,
       computeSeconds: 600,
       hours: 24,

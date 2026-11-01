@@ -1,3 +1,4 @@
+import { allocateCapital } from "../domain/allocation.js";
 import { z } from "zod";
 import { Decimal } from "decimal.js";
 import { id, fail } from "../domain/schemas.js";
@@ -21,7 +22,11 @@ export const portfolioInput = z
   .refine(
     (x) =>
       new Set(x.legs.map((l) => l.runId)).size === x.legs.length &&
-      Math.abs(x.legs.reduce((s, l) => s + l.weightPct, 0) - 100) < 1e-8,
+      x.legs
+        .reduce((s, l) => s.plus(String(l.weightPct)), new Decimal(0))
+        .minus(100)
+        .abs()
+        .lt("0.00000001"),
     "权重须合计100%，实验不能重复",
   );
 export function portfolioResearch(input: unknown, runs: RunRecord[]) {
@@ -55,7 +60,11 @@ export function portfolioResearch(input: unknown, runs: RunRecord[]) {
     .filter((t) => maps.every((m) => m.has(t)))
     .sort((a, b) => a - b);
   if (times.length < 2) fail("PORTFOLIO_SAMPLE", "组合缺少共同估值时点");
-  let values = x.legs.map((l) => new Decimal(l.weightPct).div(100)),
+  const normalized = allocateCapital(
+    "1",
+    x.legs.map((l) => l.weightPct),
+  );
+  let values = [...normalized],
     previous = maps.map(() => new Decimal(1)),
     peak = new Decimal(1),
     fees = new Decimal(0),
@@ -76,14 +85,16 @@ export function portfolioResearch(input: unknown, runs: RunRecord[]) {
       bucket = x.rebalance === "monthly" ? date.slice(0, 7) : date.slice(0, 10);
     if (x.rebalance !== "none" && lastBucket && lastBucket !== bucket) {
       const turnover = values.reduce(
-        (s, v, i) =>
-          s.plus(v.minus(total.mul(x.legs[i]!.weightPct).div(100)).abs()),
+        (s, v, i) => s.plus(v.minus(total.mul(normalized[i]!)).abs()),
         new Decimal(0),
       );
       const cost = turnover.mul(x.rebalanceCostBps).div(10000);
       fees = fees.plus(cost);
       total = total.minus(cost);
-      values = x.legs.map((l) => total.mul(l.weightPct).div(100));
+      values = allocateCapital(
+        total,
+        x.legs.map((l) => l.weightPct),
+      );
     }
     lastBucket = bucket;
     peak = Decimal.max(peak, total);
@@ -114,7 +125,7 @@ export function portfolioResearch(input: unknown, runs: RunRecord[]) {
         : null,
     ),
   );
-  const weights = x.legs.map((l) => l.weightPct / 100),
+  const weights = normalized.map((w) => w.toNumber()),
     variance = cov.reduce(
       (s, row, i) =>
         s + weights[i]! * row.reduce((v, c, j) => v + c * weights[j]!, 0),

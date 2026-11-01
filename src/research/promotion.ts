@@ -41,6 +41,12 @@ export function makePromotionPreview(
     blockers.push("研究未满足模拟观察门槛");
   if (hash(config) !== hash(p.protocol.config))
     blockers.push("资金、风险或成本与已验证研究配置不同，请先建立对应研究");
+  if (
+    p.protocol.robustness &&
+    target.definition.conditions &&
+    p.protocol.robustness.parameterVersion !== 2
+  )
+    blockers.push("旧条件策略的参数邻域未检验实际条件，请按新版协议重新研究");
   if (!engineAligned)
     blockers.push("研究包含不同或旧执行引擎的实验，请按当前版本建立后续研究");
   if (source) {
@@ -56,6 +62,7 @@ export function makePromotionPreview(
   }
   const body = {
     version: 1 as const,
+    comparisonVersion: 2 as const,
     projectId: p.id,
     reportHash: p.report?.hash ?? "",
     targetDefinitionHash: hash(target.definition),
@@ -122,6 +129,7 @@ export function verifyTransition(
   // Validate nested shape without reordering fields covered by the saved hash.
   z.object({
     version: z.literal(1),
+    comparisonVersion: z.literal(2).optional(),
     hash: z.string(),
     projectId: id,
     reportHash: z.string(),
@@ -204,6 +212,8 @@ export function verifyTransition(
       configurationChanges(
         { definition: fromVersion.definition, config: source.config },
         { definition: toVersion.definition, config: target.config },
+      ).filter(
+        (c) => v.preview.comparisonVersion === 2 || c.field !== "conditions",
       ),
     )
   )

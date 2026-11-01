@@ -1,4 +1,4 @@
-import { labAction } from "./lab.js";
+import { LabExecutor } from "./lab-executor.js";
 import { Service, type Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
@@ -37,6 +37,7 @@ export default class QuantService extends Service {
   readonly paper: Paper;
   readonly projects: ProjectService;
   readonly monitor: MonitorService;
+  readonly lab = new LabExecutor();
   constructor(ctx: Context, config: Config) {
     super(ctx, "quant");
     const directory =
@@ -48,6 +49,7 @@ export default class QuantService extends Service {
     this.projects = new ProjectService(this.research);
     this.monitor = new MonitorService(this.research);
     ctx.effect(() => async () => {
+      await this.lab.close();
       this.monitor.close();
       await this.projects.close();
       this.paper.close();
@@ -150,6 +152,7 @@ export default class QuantService extends Service {
     action: string,
     input: unknown,
     sessionId = "local-user",
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const r = this.research;
     switch (action) {
@@ -159,7 +162,7 @@ export default class QuantService extends Service {
       case "data-audit":
       case "universe-asof":
       case "simulation-replay":
-        return labAction(r, action, input);
+        return this.lab.run(r, action, input, signal);
       case "project-create":
         return this.projects.create(input, sessionId);
       case "project-list":

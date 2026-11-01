@@ -167,9 +167,12 @@ export function buildDiagnostics(
         ...(definition
           ? {
               parameter:
-                definition.template === "sma_cross"
-                  ? `slow=${definition.slow}`
-                  : `entryPeriod=${definition.entryPeriod}`,
+                definition.conditions &&
+                p.protocol.robustness?.parameterVersion === 2
+                  ? `conditions.entry[0].period=${definition.conditions.entry[0]!.period}（${definition.conditions.entry[0]!.indicator}，factor=${definition.conditions.entry[0]!.factor}）`
+                  : definition.template === "sma_cross"
+                    ? `slow=${definition.slow}`
+                    : `entryPeriod=${definition.entryPeriod}`,
             }
           : {}),
         returnPct: m.returnPct,

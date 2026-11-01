@@ -116,6 +116,37 @@ export function configurationChanges(
     before.definition.interval,
     after.definition.interval,
   );
+  const conditions = (definition: Strategy) =>
+    definition.conditions
+      ? JSON.stringify({
+          version: definition.conditions.version,
+          mode: definition.conditions.mode,
+          entry: definition.conditions.entry.map(
+            ({ indicator, period, factor, operator, value }) => ({
+              indicator,
+              period,
+              factor,
+              operator,
+              value,
+            }),
+          ),
+          exit: definition.conditions.exit.map(
+            ({ indicator, period, factor, operator, value }) => ({
+              indicator,
+              period,
+              factor,
+              operator,
+              value,
+            }),
+          ),
+        })
+      : "无组合条件";
+  add(
+    "conditions",
+    "组合条件与高周期确认",
+    conditions(before.definition),
+    conditions(after.definition),
+  );
   const labels = {
     fast: "快均线周期",
     slow: "慢均线周期",

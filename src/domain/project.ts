@@ -72,7 +72,7 @@ export const projectInput = z
       .object({
         experiments: z.number().int().min(6).max(48).default(12),
         modelRequests: z.number().int().min(1).max(100).default(20),
-        outputTokens: z.number().int().min(256).max(8192).default(2048),
+        outputTokens: z.number().int().min(256).max(8192).default(4096),
         maxBars: z.number().int().min(180).max(1000000).default(100000),
         computeSeconds: z.number().int().min(10).max(3600).default(600),
         hours: z.number().int().min(1).max(168).default(24),
@@ -81,7 +81,7 @@ export const projectInput = z
       .default(() => ({
         experiments: 12,
         modelRequests: 20,
-        outputTokens: 2048,
+        outputTokens: 4096,
         maxBars: 100000,
         computeSeconds: 600,
         hours: 24,
@@ -294,6 +294,17 @@ export interface ResearchProject {
   createdAt: string;
   updatedAt: string;
 }
+export interface DispatchToolTrace {
+  name: string;
+  action?: string;
+  ok: boolean;
+  error?: string;
+}
+export interface DispatchTrace {
+  outputTokens: number;
+  finishKinds: string[];
+  tools: DispatchToolTrace[];
+}
 export interface ModelDispatch {
   id: string;
   projectId: string;
@@ -311,6 +322,8 @@ export interface ModelDispatch {
   requestKeys: string[];
   usageKeys: string[];
   error: string;
+  /** Per-dispatch tool/stream facts for idle-failure diagnosis; optional for legacy rows. */
+  trace?: DispatchTrace;
 }
 export const projectControl = z
   .object({

@@ -12,6 +12,7 @@ import type {
 export const robustnessInput = z
   .object({
     version: z.literal(1).default(1),
+    parameterVersion: z.literal(2).optional(),
     costMultipliers: z
       .array(z.number().gt(1).max(10))
       .min(1)
@@ -56,7 +57,34 @@ export function minimumExperiments(
       : 0)
   );
 }
-export function parameterNeighbors(strategy: Strategy, shiftPct: number) {
+export function parameterNeighbors(
+  strategy: Strategy,
+  shiftPct: number,
+  parameterVersion: 1 | 2 = 2,
+) {
+  if (strategy.conditions && parameterVersion === 2) {
+    const first = strategy.conditions.entry[0]!;
+    const upper = Math.min(1000, Math.floor(2003 / first.factor) - 2);
+    const delta = Math.max(1, Math.round((first.period * shiftPct) / 100));
+    return [
+      ...new Set(
+        [-1, 1].map((sign) =>
+          Math.max(2, Math.min(upper, first.period + sign * delta)),
+        ),
+      ),
+    ]
+      .filter((period) => period !== first.period)
+      .map((period) => ({
+        ...strategy,
+        conditions: {
+          ...strategy.conditions!,
+          entry: strategy.conditions!.entry.map((c, i) =>
+            i === 0 ? { ...c, period } : { ...c },
+          ),
+          exit: strategy.conditions!.exit.map((c) => ({ ...c })),
+        },
+      }));
+  }
   const key = strategy.template === "sma_cross" ? "slow" : "entryPeriod";
   const lower = key === "slow" ? strategy.fast + 1 : 2;
   const upper = key === "slow" ? 2000 : 1000;
@@ -104,13 +132,20 @@ export function diagnosticPlan(
       ...p.ranges.validation,
       diagnostic: { key: `cost:${multiplier}`, multiplier },
     });
-  for (const definition of parameterNeighbors(selected, r.parameterShiftPct))
+  for (const definition of parameterNeighbors(
+    selected,
+    r.parameterShiftPct,
+    r.parameterVersion ?? 1,
+  ))
     plans.push({
       candidateId,
       phase: "parameter_sensitivity",
       ...p.ranges.validation,
       diagnostic: {
-        key: `parameter:${definition.slow}:${definition.entryPeriod}`,
+        key:
+          definition.conditions && r.parameterVersion === 2
+            ? `parameter:conditions:entry:0:period:${definition.conditions.entry[0]!.period}`
+            : `parameter:${definition.slow}:${definition.entryPeriod}`,
         definition,
         baseDefinition: selected,
       },
@@ -179,7 +214,11 @@ export function diagnosticsFinished(p: ResearchProject, selected: Strategy) {
   return (
     plans.length ===
       r.costMultipliers.length +
-        parameterNeighbors(selected, r.parameterShiftPct).length +
+        parameterNeighbors(
+          selected,
+          r.parameterShiftPct,
+          r.parameterVersion ?? 1,
+        ).length +
         r.walkForwardFolds * (initial + 1) &&
     plans.every((plan) => successfulDiagnostic(p, plan.diagnostic.key))
   );

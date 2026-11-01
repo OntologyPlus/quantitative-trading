@@ -88,6 +88,7 @@ export default class QuantRPC extends Service {
                     action,
                     envelope.input ?? {},
                     envelope.sessionId,
+                    request.signal,
                   ),
                 },
               });

@@ -38,6 +38,7 @@ export function needsBuild(root) {
       "host/rpc.js",
       "host/agent.js",
       "workers/backtest.js",
+      "workers/lab.js",
       "client.js",
       "build-state.json",
     ].some((p) => !existsSync(join(root, "dist", p))) ||

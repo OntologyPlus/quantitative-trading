@@ -210,7 +210,7 @@ test("Agent actions enforce evidence, budget, same-market candidates, one select
   try {
     const p = f.create({
       mode: "agent",
-      budget: { modelRequests: 2, experiments: 8 },
+      budget: { modelRequests: 4, experiments: 8 },
     });
     f.start(p);
     const waiting = await f.drive(p.id, (p) => p.status === "waiting_agent");
@@ -226,8 +226,14 @@ test("Agent actions enforce evidence, budget, same-market candidates, one select
     f.service.reserveModelRequest(d.id, "request-2");
     assert.equal(f.read(p.id).budgetUsed.modelRequests, 2);
     assert.throws(
-      () => f.service.reserveModelRequest(d.id, "request-3"),
-      /达到委托上限/,
+      () =>
+        f.service.action(d.id, {
+          action: "analyze",
+          kind: "interpretation",
+          text: `该指标为[[e:${ref.id}]]`,
+          evidenceIds: [ref.id],
+        }),
+      /候选选择与规划阶段不能 analyze/,
     );
     assert.throws(
       () =>
@@ -243,23 +249,6 @@ test("Agent actions enforce evidence, budget, same-market candidates, one select
       () => f.service.action(d.id, { action: "finish" }),
       /必须完成/,
     );
-    assert.throws(
-      () =>
-        f.service.action(d.id, {
-          action: "analyze",
-          kind: "interpretation",
-          text: "回测收益高达999999%",
-          evidenceIds: [ref.id],
-        }),
-      /解释中的数字须使用/,
-    );
-    f.service.action(d.id, {
-      action: "analyze",
-      kind: "interpretation",
-      text: `该指标为[[e:${ref.id}]]，其含义以对应实验为准。`,
-      evidenceIds: [ref.id],
-    });
-    assert.ok(f.read(p.id).analyses[0]!.text.includes(String(ref.value)));
     const definition = f.r.store.get<StrategyRecord>(
       "strategy",
       c.strategyId,
@@ -287,9 +276,34 @@ test("Agent actions enforce evidence, budget, same-market candidates, one select
       () => f.service.action(d.id, { ...action, reason: "改选" }),
       /取消、暂停或过期/,
     );
+    const reporting = await f.drive(
+      p.id,
+      (p) => p.stage === "report" && p.status === "waiting_agent",
+    );
+    assert.equal(reporting.status, "waiting_agent");
+    const report = dispatches.find((x) => x.stage === "report")!;
+    const reportCtx = f.service.context(p.id);
+    const reportRef = reportCtx.evidence[0]!;
+    assert.throws(
+      () =>
+        f.service.action(report.id, {
+          action: "analyze",
+          kind: "interpretation",
+          text: "回测收益高达999999%",
+          evidenceIds: [reportRef.id],
+        }),
+      /解释中的数字须使用/,
+    );
+    f.service.action(report.id, {
+      action: "analyze",
+      kind: "interpretation",
+      text: `该指标为[[e:${reportRef.id}]]，其含义以对应实验为准。`,
+      evidenceIds: [reportRef.id],
+    });
+    assert.ok(f.read(p.id).analyses[0]!.text.includes(String(reportRef.value)));
+    f.service.action(report.id, { action: "finish" });
     const delivery = await f.drive(p.id);
-    assert.equal(delivery.status, "waiting_input");
-    assert.match(delivery.reason, /模型请求预算/);
+    assert.equal(delivery.status, "completed");
     assert.equal(delivery.experiments.length, 6);
   } finally {
     await f.close();

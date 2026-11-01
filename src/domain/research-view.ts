@@ -316,6 +316,8 @@ export function eventDescription(
     resume: "在原预算和授权范围内继续，保留已有实验。",
     model_request: "本次模型请求已计入项目预算。",
     model_usage: "按宿主实际报告结算用量，未报告的用量不记作零。",
+    agent_failed:
+      "本轮未完成有效推进动作；详情见事件消息（可能为输出上限、仅 analyze 或工具失败）。",
   };
   return descriptions[type] ?? "详细事实已保存在事件记录中，可展开核对。";
 }

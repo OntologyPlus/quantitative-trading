@@ -41,6 +41,7 @@ import {
 } from "../research/evaluation.js";
 import { Research, uid, type DataJob } from "../host/research.js";
 import {
+  robustnessInput,
   diagnosticPlan,
   diagnosticConfig,
   diagnosticsFinished,
@@ -213,6 +214,12 @@ export class ProjectService {
     author: "user" | "ai" = "user",
   ) {
     const x = projectInput.parse(input);
+    // New protocols freeze corrected semantics; unmodified legacy archives retain their hashes.
+    if (x.robustness)
+      x.robustness = robustnessInput.parse({
+        ...x.robustness,
+        parameterVersion: 2,
+      });
     if (x.simulationSource) {
       const source = loadSimulationReview(
         this.research,
@@ -920,6 +927,13 @@ export class ProjectService {
           (usage.cacheReadTokens ?? 0) +
           (usage.cacheWriteTokens ?? 0);
         p.budgetUsed.outputTokens += usage.outputTokens;
+        const trace = d.trace ?? {
+          outputTokens: 0,
+          finishKinds: [],
+          tools: [],
+        };
+        trace.outputTokens += usage.outputTokens;
+        d.trace = trace;
       } else p.budgetUsed.usageComplete = false;
       this.store.put("dispatch", d.id, d);
       this.save(p, "model_usage", {
@@ -929,7 +943,58 @@ export class ProjectService {
       });
     });
   }
-  agentError(dispatchId: string, message: string, unknown = false) {
+  recordFinishKind(dispatchId: string, kind: string) {
+    if (!this.leaseValid()) return;
+    try {
+      const d = this.store.get<ModelDispatch>("dispatch", dispatchId);
+      const trace = d.trace ?? {
+        outputTokens: 0,
+        finishKinds: [],
+        tools: [],
+      };
+      if (trace.finishKinds.length < 20) trace.finishKinds.push(kind.slice(0, 40));
+      d.trace = trace;
+      this.store.put("dispatch", d.id, d);
+    } catch {
+      /* dispatch may already be fenced */
+    }
+  }
+  recordToolTrace(
+    dispatchId: string,
+    tool: {
+      name: string;
+      action?: string;
+      ok: boolean;
+      error?: string;
+    },
+  ) {
+    if (!this.leaseValid()) return;
+    try {
+      const d = this.store.get<ModelDispatch>("dispatch", dispatchId);
+      const trace = d.trace ?? {
+        outputTokens: 0,
+        finishKinds: [],
+        tools: [],
+      };
+      if (trace.tools.length < 40)
+        trace.tools.push({
+          name: tool.name.slice(0, 80),
+          ...(tool.action ? { action: tool.action.slice(0, 40) } : {}),
+          ok: tool.ok,
+          ...(tool.error ? { error: tool.error.slice(0, 2000) } : {}),
+        });
+      d.trace = trace;
+      this.store.put("dispatch", d.id, d);
+    } catch {
+      /* dispatch may already be fenced */
+    }
+  }
+  agentError(
+    dispatchId: string,
+    message: string,
+    unknown = false,
+    facts: Record<string, unknown> = {},
+  ) {
     if (!this.leaseValid()) return;
     const d = this.store.get<ModelDispatch>("dispatch", dispatchId),
       p = this.store.get<ResearchProject>("project", d.projectId);
@@ -952,6 +1017,8 @@ export class ProjectService {
       this.save(p, unknown ? "outcome_unknown" : "agent_failed", {
         dispatchId,
         message,
+        ...facts,
+        ...(d.trace ? { trace: d.trace } : {}),
       });
     });
   }
@@ -974,6 +1041,11 @@ export class ProjectService {
               fail("EVIDENCE_MISSING", "引用证据不属于当前项目或尚未揭示");
         }
         if (action.action === "analyze") {
+          if (p.stage !== "report")
+            fail(
+              "INVALID_STAGE",
+              "候选选择与规划阶段不能 analyze；请直接 select、propose、begin 或 request_input，解释留到报告阶段",
+            );
           if (p.analyses.length >= 20)
             fail("ANALYSIS_LIMIT", "本项目最多保存20项解释或假设");
           if (

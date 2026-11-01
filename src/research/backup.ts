@@ -172,6 +172,25 @@ const dispatchShape = z
     requestKeys: z.array(z.string()).max(100),
     usageKeys: z.array(z.string()).max(200),
     error: z.string(),
+    trace: z
+      .object({
+        outputTokens: integer,
+        finishKinds: z.array(z.string().max(40)).max(20),
+        tools: z
+          .array(
+            z
+              .object({
+                name: z.string().max(80),
+                action: z.string().max(40).optional(),
+                ok: z.boolean(),
+                error: z.string().max(2000).optional(),
+              })
+              .strict(),
+          )
+          .max(40),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export function validateProjects(

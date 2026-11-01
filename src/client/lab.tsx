@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import type { Caller } from "./api.js";
 import { call, download } from "./api.js";
 const examples = {
@@ -51,6 +51,16 @@ export function ResearchLab({
     [result, setResult] = useState<unknown>(),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setBusy(false);
+    setError("");
+    setResult(undefined);
+    return () => {
+      controller.current?.abort();
+      controller.current = null;
+    };
+  }, [sessionId]);
   return (
     <details className="card">
       <summary>研究增强实验室</summary>
@@ -61,6 +71,7 @@ export function ResearchLab({
         研究工具
         <select
           value={action}
+          disabled={busy}
           onChange={(e) => {
             const next = e.target.value as keyof typeof examples;
             setAction(next);
@@ -82,26 +93,50 @@ export function ResearchLab({
           aria-label="研究增强分析条件"
           rows={9}
           value={input}
+          disabled={busy}
           onChange={(e) => setInput(e.target.value)}
         />
       </label>
       <button
         disabled={busy}
         onClick={async () => {
+          const pending = new AbortController();
+          controller.current = pending;
           setBusy(true);
           setError("");
           setResult(undefined);
           try {
-            setResult(await call(rpc, sessionId, action, JSON.parse(input)));
+            const value = await call(
+              rpc,
+              sessionId,
+              action,
+              JSON.parse(input),
+              pending.signal,
+            );
+            if (controller.current === pending && !pending.signal.aborted)
+              setResult(value);
           } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            if (controller.current === pending)
+              setError(
+                pending.signal.aborted
+                  ? "分析已取消"
+                  : e instanceof Error
+                    ? e.message
+                    : String(e),
+              );
           } finally {
-            setBusy(false);
+            if (controller.current === pending) {
+              controller.current = null;
+              setBusy(false);
+            }
           }
         }}
       >
         {busy ? "正在分析…" : "生成分析"}
       </button>
+      {busy && (
+        <button onClick={() => controller.current?.abort()}>取消分析</button>
+      )}
       {error && <p role="alert">{error}</p>}
       {result !== undefined && (
         <>
