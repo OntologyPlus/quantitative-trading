@@ -30,6 +30,7 @@ interface RunSummary extends Omit<RunRecord, "result"> {
 }
 interface Snapshot {
   schemaVersion: number;
+  engineVersion?: string;
   asOf: string;
   datasets: Dataset[];
   strategies: StrategyRecord[];
@@ -1475,8 +1476,26 @@ export function Studio({
                   <span className="badge">{labels[detail.status]}</span>
                 </div>
                 <p className="mono">{detail.id}</p>
+                <p className="hint">
+                  创建于 {date(detail.createdAt)}；计算耗时{" "}
+                  {fmt(detail.computeMs, 0)} ms。
+                  {snap?.engineVersion &&
+                    detail.config.engineVersion !== snap.engineVersion &&
+                    " 这是历史引擎产物；请用当前版本重新回测后生成统计分析。"}
+                </p>
+                <small className="mono">
+                  引擎 {detail.config.engineVersion}
+                </small>
                 {detail.result && (
                   <>
+                    {detail.result.state.idle && (
+                      <p className="hint">
+                        已省略空闲决策：预热{" "}
+                        {fmt(detail.result.state.idle.warmup, 0)} 根， 无信号{" "}
+                        {fmt(detail.result.state.idle.noSignal, 0)}{" "}
+                        根；日志保留信号、拒单与成交事件。
+                      </p>
+                    )}
                     <Curve values={detail.result.state.curve} />
                     <MetricGrid m={detail.result.metrics} />
                     <p className="hint">

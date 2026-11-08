@@ -89,17 +89,38 @@ export function ResearchLab({
     setBusy(false);
     setError("");
     setResult(undefined);
+    if (runId)
+      setInput((current) => {
+        try {
+          return JSON.stringify(withRun(JSON.parse(current), runId), null, 2);
+        } catch {
+          return current;
+        }
+      });
     return () => {
       controller.current?.abort();
       controller.current = null;
     };
-  }, [sessionId]);
+  }, [sessionId, runId]);
   return (
     <details className="card">
       <summary>研究增强实验室</summary>
       <p>
         核对完整实验与数据身份后分析。组合是净值序列情景，同区间对账保留成交模型和初始仓位差异；结果中列明假设与限制。
       </p>
+      {(action === "parameter-sweep" || action === "walk-forward") && (
+        <p className="hint">
+          需使用当前引擎的单标的均线或突破回测与基础风控；表达式、轮动、附加条件及高级风控暂不支持扫描和前推。
+          DSR/PBO
+          在扫描结果中提供，至少需要两个参数组合及三十个日收益；实验室分析尚未接入研究委托的验收门槛。
+        </p>
+      )}
+      {action === "performance-report" && (
+        <p className="hint">
+          支持表达式和轮动；需使用当前引擎的已完成回测，至少覆盖两个 UTC
+          日。完整绩效指标位于此报告，普通回测指标不会自动扩展。
+        </p>
+      )}
       <label>
         研究工具
         <select
@@ -183,16 +204,16 @@ export function ResearchLab({
           <LabResult action={action} result={result} />
           <details>
             <summary>完整结果 JSON</summary>
-          <pre
-            style={{
-              whiteSpace: "pre-wrap",
-              overflowWrap: "anywhere",
-              maxHeight: 500,
-              overflow: "auto",
-            }}
-          >
-            {JSON.stringify(result, null, 2)}
-          </pre>
+            <pre
+              style={{
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
+                maxHeight: 500,
+                overflow: "auto",
+              }}
+            >
+              {JSON.stringify(result, null, 2)}
+            </pre>
           </details>
         </>
       )}

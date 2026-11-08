@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { z } from "zod";
 import { D } from "../engine/core.js";
+import { createSymbolDirectory } from "./symbol-directory.js";
 import { barSchema, fail, rulesSchema } from "../domain/schemas.js";
 import {
   INTERVAL_MS,
@@ -178,12 +179,7 @@ async function request(path: string, signal?: AbortSignal): Promise<any> {
     );
   return response.json();
 }
-export async function symbols(signal?: AbortSignal): Promise<
-  {
-    symbol: string;
-    rules: Rules;
-  }[]
-> {
+const directory = createSymbolDirectory(async (signal) => {
   const data = await request("/api/v3/exchangeInfo", signal);
   return data.symbols
     .filter(
@@ -210,6 +206,14 @@ export async function symbols(signal?: AbortSignal): Promise<
         }),
       };
     });
+});
+/** Fresh cached rules only; execution preparation never falls back to stale rules. */
+export async function symbols(signal?: AbortSignal) {
+  return (await directory.read(signal)).symbols;
+}
+/** Inspection may return a clearly dated stale directory during a network outage. */
+export function symbolDirectory(signal?: AbortSignal) {
+  return directory.read(signal, true);
 }
 async function restRange(
   symbol: string,

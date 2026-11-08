@@ -54,6 +54,7 @@
     "check:browser": "node scripts/check-browser.mjs",
     "check:soak": "node scripts/check-soak.mjs",
     "check:eval": "node scripts/evaluate-agent.mjs",
+    "check:optimizations": "node scripts/check-optimizations.mjs",
     "benchmark:projects": "node scripts/benchmark-projects.mjs",
     "format": "prettier --write \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\" \"scripts/*.mjs\""
   },

@@ -285,6 +285,7 @@ export const TOOL_TITLES: Record<string, string> = {
   qt_strategy_draft: "策略草稿",
   qt_backtest_submit: "提交回测",
   qt_run_read: "回测结果",
+  qt_lab_analyze: "研究统计分析",
   qt_runs_compare: "比较实验",
   qt_portfolio_read: "模拟账户",
   qt_decisions_read: "决策日志",

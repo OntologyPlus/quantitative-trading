@@ -14,7 +14,8 @@ import {
   type StrategyRecord,
 } from "../domain/contracts.js";
 import { id } from "../domain/schemas.js";
-import { symbols } from "../adapters/market.js";
+import { symbolDirectory, gapReport, GAP_POLICY } from "../adapters/market.js";
+import { labToolInput, labToolView } from "./lab-tool.js";
 import { POLICY } from "../domain/policy.js";
 import { FUNCTIONS } from "../domain/dsl.js";
 import { STRATEGY_CATALOG } from "../domain/strategy-catalog.js";
@@ -46,6 +47,7 @@ export function apply(ctx: Context) {
     parameters: ParameterSchemaSpec,
     fn: (args: unknown, exec: ToolRunContext) => unknown,
     write = false,
+    concurrencySafe = !write,
   ) =>
     ctx.tools.register(
       defineTool({
@@ -60,7 +62,7 @@ export function apply(ctx: Context) {
           },
           render: (_a, v) => [{ type: "text", text: JSON.stringify(v) }],
         },
-        isConcurrencySafe: () => !write,
+        isConcurrencySafe: () => concurrencySafe,
         execute: async (args, exec) => {
           exec.signal.throwIfAborted();
           const active = r.store
@@ -77,6 +79,7 @@ export function apply(ctx: Context) {
               "qt_backtest_submit",
               "qt_dataset_prepare",
               "qt_strategy_draft",
+              "qt_lab_analyze",
             ].includes(name)
           )
             fail(
@@ -153,16 +156,33 @@ export function apply(ctx: Context) {
   );
   register(
     "qt_symbols",
-    "查询支持的 USDT 现货交易对和当前交易规则",
-    { query: { type: "string" } },
+    "查询 USDT 现货交易对目录，返回symbols及asOf/stale/source。空query列出全部候选的分页；过期缓存仅供池子核对，不作为当前成交规则",
+    {
+      query: { type: "string" },
+      offset: { type: "integer" },
+      limit: { type: "integer" },
+    },
     async (args, exec) => {
       const x = z
-        .object({ query: z.string().max(30).default("BTC") })
+        .object({
+          query: z.string().max(30).default("BTC"),
+          offset: z.number().int().nonnegative().default(0),
+          limit: z.number().int().min(1).max(100).default(30),
+        })
         .strict()
         .parse(args);
-      return (await symbols(exec.signal))
-        .filter((v) => v.symbol.includes(x.query.toUpperCase()))
-        .slice(0, 30);
+      const { symbols, ...directory } = await symbolDirectory(exec.signal),
+        matches = symbols.filter((v) =>
+          v.symbol.includes(x.query.trim().toUpperCase()),
+        );
+      return {
+        ...directory,
+        symbols: matches.slice(x.offset, x.offset + x.limit),
+        total: matches.length,
+        offset: x.offset,
+        limit: x.limit,
+        hasMore: x.offset + x.limit < matches.length,
+      };
     },
   );
   register(
@@ -184,6 +204,8 @@ export function apply(ctx: Context) {
         .parse(args);
       if (!x.id) return r.store.list("dataset");
       const dataset = r.store.get<Dataset>("dataset", x.id);
+      const bars = r.bars(dataset),
+        gaps = gapReport(bars, dataset.interval);
       const active = r.store
         .list<ResearchProject>("project")
         .find(
@@ -194,8 +216,16 @@ export function apply(ctx: Context) {
         );
       return {
         ...dataset,
-        bars: r
-          .bars(dataset)
+        quality: {
+          ...dataset.quality,
+          missingBars: gaps.missing,
+          longestGapMs: gaps.longestMs,
+          missingRatio: gaps.missing / (bars.length + gaps.missing),
+          policy: GAP_POLICY,
+          handling: "缺失的预定开盘不成交，信号作废并记 DATA_GAP；不补造 K 线",
+        },
+        storage: "json",
+        bars: bars
           .filter((b) => b.time >= x.from)
           .filter((b) => !active || b.time <= active.ranges.validation.to)
           .slice(0, x.limit),
@@ -222,6 +252,12 @@ export function apply(ctx: Context) {
         ? r.store.get<StrategyRecord>("strategy", x.id)
         : {
             templates: ["sma_cross", "breakout", "expr", "rotation"],
+            limits: {
+              maxSymbols: 10,
+              rotationPaperTrading: false,
+              symbolValidation:
+                "草稿只校验语法；交易对、数据覆盖和规则在运行准备时核验",
+            },
             defaults: { fast: 20, slow: 60, entryPeriod: 20, exitPeriod: 10 },
             expression: {
               fields: ["open", "high", "low", "close", "volume"],
@@ -237,7 +273,8 @@ export function apply(ctx: Context) {
               trailingStopPct: "按最高价回撤百分比移动止损",
               trailingAtr: "吊灯止损：持仓以来最高价 − 倍数 × ATR",
               maxHoldBars: "持有满 N 根后下一开盘退出",
-              "sizing=volatility": "按 targetVolPct 年化目标波动率定仓（volPeriod 默认 20）",
+              "sizing=volatility":
+                "按 targetVolPct 年化目标波动率定仓（volPeriod 默认 20）",
             },
             catalog: STRATEGY_CATALOG,
             strategies: r.store.list("strategy"),
@@ -268,6 +305,53 @@ export function apply(ctx: Context) {
     "读取回测状态与真实指标、分页成交、摘要净值",
     { id: string, offset: { type: "integer" }, limit: { type: "integer" } },
     (args) => q.readRun(args),
+  );
+  register(
+    "qt_lab_analyze",
+    "分析当前引擎的独立已完成回测。action为performance-report（所有模板）、parameter-sweep或walk-forward（仅单标的均线/突破、基础风控）。input含runId；扫描含grid:{fast:[],slow:[]}、top、search:{mode:'grid'|'random',samples,seed}；前推另含trainBars/testBars/mode:'rolling'|'anchored'；绩效可含costMultipliers/rollingDays。返回源身份、完整分析hash与有界结果；offset/limit分页扫描行，曲线采样不改变统计。不会发布策略、更改资金或将结果写入项目门槛",
+    {
+      action: {
+        type: "string",
+        enum: ["parameter-sweep", "walk-forward", "performance-report"],
+        required: true,
+      },
+      input: json,
+      offset: { type: "integer" },
+      limit: { type: "integer" },
+    },
+    async (args, exec) => {
+      const x = labToolInput.parse(args),
+        run = r.store.get<RunRecord>("run", x.input.runId);
+      if (run.projectId)
+        fail(
+          "PROJECT_SCOPE",
+          "委托实验请通过项目工具读取冻结证据；实验室工具仅分析独立回测",
+        );
+      const result = await q.lab.run(r, x.action, x.input, exec.signal);
+      return {
+        action: x.action,
+        source: {
+          runId: run.id,
+          engineVersion: run.config.engineVersion,
+          manifestHash: run.manifestHash,
+          resultHash: run.result?.hash,
+          from: run.config.from,
+          to: run.config.to,
+          datasets: run.datasetIds.map((id) => {
+            const d = r.store.get<Dataset>("dataset", id);
+            return {
+              id,
+              hash: d.hash,
+              symbol: d.symbol,
+              synthetic: d.synthetic,
+            };
+          }),
+        },
+        ...labToolView(x.action, result, x.offset, x.limit),
+      };
+    },
+    false,
+    false,
   );
   register(
     "qt_runs_compare",

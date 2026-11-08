@@ -20,6 +20,7 @@ import type { ResearchProject } from "../domain/project.js";
 import { existsSync } from "node:fs";
 import { ENGINE_VERSION } from "../engine/backtest.js";
 import { MonitorService } from "./monitor.js";
+import { GAP_POLICY } from "../adapters/market.js";
 export interface Config {
   dataDirectory: string;
 }
@@ -62,6 +63,7 @@ export default class QuantService extends Service {
     return {
       schemaVersion: 1,
       mode: "research-paper-only",
+      engineVersion: ENGINE_VERSION,
       datasets: s.page<Dataset>("dataset", 0, 100),
       strategies: s
         .page<StrategyRecord>("strategy", 0, 100)
@@ -86,6 +88,33 @@ export default class QuantService extends Service {
         syntheticData: true,
         publicData: true,
         maxBars: 1000000,
+        maxSymbols: 10,
+        shortSelling: false,
+        perpetuals: false,
+        fundingRates: false,
+        data: { storage: "json", monthlyArchives: true, gapPolicy: GAP_POLICY },
+        analysis: {
+          performanceReport: {
+            templates: ["sma_cross", "breakout", "expr", "rotation"],
+            minDays: 2,
+          },
+          parameterSweep: {
+            templates: ["sma_cross", "breakout"],
+            maxSymbols: 1,
+            extendedRisk: false,
+            conditions: false,
+            search: ["grid", "random"],
+            minStatisticsObservations: 30,
+          },
+          walkForward: {
+            templates: ["sma_cross", "breakout"],
+            maxSymbols: 1,
+            extendedRisk: false,
+            conditions: false,
+            modes: ["rolling", "anchored"],
+          },
+          projectIntegration: false,
+        },
       },
       asOf: new Date().toISOString(),
     };
@@ -100,15 +129,21 @@ export default class QuantService extends Service {
         .strict()
         .parse(input),
       run = this.research.store.get<RunRecord>("run", x.id);
-    if (!run.result) return run;
+    const engine = {
+      currentEngineVersion: ENGINE_VERSION,
+      usesCurrentEngine: run.config.engineVersion === ENGINE_VERSION,
+    };
+    if (!run.result) return { ...run, ...engine };
     const { state, ...result } = run.result;
     return {
       ...run,
+      ...engine,
       result: {
         ...result,
         state: {
           cash: state.cash,
           positions: state.positions,
+          idle: state.idle ?? null,
           curve: state.curve
             .filter(
               (_, i) =>
@@ -120,6 +155,9 @@ export default class QuantService extends Service {
         },
         totalFills: state.fills.length,
         totalDecisions: state.decisions.length,
+        decisionLogging: state.idle
+          ? "events-and-idle-counters"
+          : "not-reported",
         offset: x.offset,
       },
     };
