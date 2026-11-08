@@ -16,6 +16,8 @@ import {
 import { id } from "../domain/schemas.js";
 import { symbols } from "../adapters/market.js";
 import { POLICY } from "../domain/policy.js";
+import { FUNCTIONS } from "../domain/dsl.js";
+import { STRATEGY_CATALOG } from "../domain/strategy-catalog.js";
 import { fail } from "../domain/schemas.js";
 import type { ResearchProject } from "../domain/project.js";
 import { hash } from "../adapters/market.js";
@@ -219,15 +221,32 @@ export function apply(ctx: Context) {
       return x.id
         ? r.store.get<StrategyRecord>("strategy", x.id)
         : {
-            templates: ["sma_cross", "breakout"],
+            templates: ["sma_cross", "breakout", "expr", "rotation"],
             defaults: { fast: 20, slow: 60, entryPeriod: 20, exitPeriod: 10 },
+            expression: {
+              fields: ["open", "high", "low", "close", "volume"],
+              operators: ["+ - * /", "< > <= >=", "and or not", "( )"],
+              functions: Object.fromEntries(
+                Object.entries(FUNCTIONS).map(([k, v]) => [k, v.doc]),
+              ),
+              notes:
+                "指标只用已收盘K线，float64 计算；成交、资金和账本仍为十进制精确计算。cross_above/below 比较上一根与本根。",
+            },
+            riskOptions: {
+              stopAtr: "ATR 倍数止损（atrPeriod 默认 14）",
+              trailingStopPct: "按最高价回撤百分比移动止损",
+              trailingAtr: "吊灯止损：持仓以来最高价 − 倍数 × ATR",
+              maxHoldBars: "持有满 N 根后下一开盘退出",
+              "sizing=volatility": "按 targetVolPct 年化目标波动率定仓（volPeriod 默认 20）",
+            },
+            catalog: STRATEGY_CATALOG,
             strategies: r.store.list("strategy"),
           };
     },
   );
   register(
     "qt_strategy_draft",
-    "保存草稿。input含submissionId,expectedRevision,name,definition；definition含template,symbols,interval,fast,slow,entryPeriod,exitPeriod；不可发布",
+    "保存草稿。input含submissionId,expectedRevision,name,definition；definition含template,symbols,interval；均线/突破用fast,slow,entryPeriod,exitPeriod；template=expr时用rules:{version:1,entry,exit}表达式；template=rotation时用rotation:{version:1,score,filter?,top,every}。先用qt_strategy_read查看函数与策略库；不可发布",
     { input: json },
     (args) =>
       r.draft(

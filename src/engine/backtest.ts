@@ -7,7 +7,7 @@ import type {
 } from "../domain/contracts.js";
 import { D, initialState, ingestBatch, metrics, assertLedger } from "./core.js";
 declare const __ENGINE_BUILD_HASH__: string;
-export const ENGINE_VERSION = `quant-engine-0.1.0+${typeof __ENGINE_BUILD_HASH__ === "string" ? __ENGINE_BUILD_HASH__ : "source"}`;
+export const ENGINE_VERSION = `quant-engine-0.3.0+${typeof __ENGINE_BUILD_HASH__ === "string" ? __ENGINE_BUILD_HASH__ : "source"}`;
 export function backtest(
   strategy: Strategy,
   config: RunConfig,

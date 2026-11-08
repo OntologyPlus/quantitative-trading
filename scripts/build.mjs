@@ -13,7 +13,10 @@ const engineHash = createHash("sha256")
   .update(
     [
       "src/engine/core.ts",
+      "src/engine/fixed.ts",
+      "src/engine/sweep.ts",
       "src/domain/conditions.ts",
+      "src/domain/dsl.ts",
       "src/engine/portfolio.ts",
       "src/domain/allocation.ts",
       "src/engine/backtest.ts",
@@ -35,6 +38,7 @@ await build({
     "src/host/agent.ts",
     "src/workers/backtest.ts",
     "src/workers/lab.ts",
+    "src/workers/sweep.ts",
   ],
   outdir: "dist",
   outbase: "src",

@@ -1,5 +1,6 @@
 import { provenanceSchema } from "../domain/provenance.js";
 import { strategySchema } from "../domain/schemas.js";
+import { STRATEGY_CATALOG } from "../domain/strategy-catalog.js";
 import { ResearchLab } from "./lab.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UseSidebarRightTabInfo } from "@deepseek-ai/dsh-client-ui-sidebar-right/client";
@@ -78,6 +79,16 @@ const defaultRisk = {
   dailyLossPct: "5",
   maxDrawdownPct: "20",
 };
+const advancedRiskFields = {
+  stopAtr: "ATR 止损倍数（空为不用）",
+  atrPeriod: "ATR 周期（默认 14）",
+  trailingStopPct: "移动止损：最高价回撤 %",
+  trailingAtr: "吊灯止损：ATR 倍数",
+  maxHoldBars: "最长持有 K 线数",
+  targetVolPct: "目标年化波动率 %（波动率仓位）",
+  volPeriod: "波动率周期（默认 20）",
+} as const;
+const integerRiskFields = new Set(["atrPeriod", "maxHoldBars", "volPeriod"]);
 const defaultCosts = { feeBps: "10", slippageBps: "5", participationPct: "1" };
 export function Curve({ values }: { values: Equity[] }) {
   if (values.length < 2) return <p className="empty">完成运行后显示净值曲线</p>;
@@ -180,7 +191,15 @@ export function Studio({
     [fillOffset, setFillOffset] = useState(0),
     [comparison, setComparison] = useState<string[]>([]);
   const [name, setName] = useState("我的均线策略"),
-    [template, setTemplate] = useState<"sma_cross" | "breakout">("sma_cross"),
+    [template, setTemplate] = useState<
+      "sma_cross" | "breakout" | "expr" | "rotation"
+    >("sma_cross"),
+    [ruleEntry, setRuleEntry] = useState(""),
+    [ruleExit, setRuleExit] = useState(""),
+    [rotScore, setRotScore] = useState("roc(close, 168)"),
+    [rotFilter, setRotFilter] = useState(""),
+    [rotTop, setRotTop] = useState(2),
+    [rotEvery, setRotEvery] = useState(168),
     [symbolText, setSymbolText] = useState("BTCUSDT"),
     [timeframe, setTimeframe] = useState("1h"),
     [fast, setFast] = useState(20),
@@ -215,8 +234,34 @@ export function Studio({
   } catch {
     conditionError = "条件格式无效，请按示例检查。";
   }
+  const expressionFields = () =>
+    template === "expr"
+      ? { rules: { version: 1 as const, entry: ruleEntry, exit: ruleExit } }
+      : template === "rotation"
+        ? {
+            rotation: {
+              version: 1 as const,
+              score: rotScore,
+              ...(rotFilter.trim() ? { filter: rotFilter } : {}),
+              top: rotTop,
+              every: rotEvery,
+            },
+          }
+        : {};
+  let expressionError = "";
+  if (template === "expr" || template === "rotation") {
+    const checked = strategySchema.safeParse({
+      template,
+      symbols: symbolText.split(",").map((x) => x.trim()),
+      interval: timeframe,
+      ...expressionFields(),
+    });
+    if (!checked.success)
+      expressionError = checked.error.issues.map((i) => i.message).join("；");
+  }
   const [cash, setCash] = useState("10000"),
     [risk, setRisk] = useState(defaultRisk),
+    [advancedRisk, setAdvancedRisk] = useState<Record<string, string>>({}),
     [costs, setCosts] = useState(defaultCosts),
     [from, setFrom] = useState(() =>
       new Date(Math.floor(Date.now() / 3600000) * 3600000 - 90 * 86400000)
@@ -390,6 +435,14 @@ export function Studio({
     setTemplate(s.definition.template);
     setSymbolText(s.definition.symbols.join(","));
     setTimeframe(s.definition.interval);
+    setRuleEntry(s.definition.rules?.entry ?? "");
+    setRuleExit(s.definition.rules?.exit ?? "");
+    if (s.definition.rotation) {
+      setRotScore(s.definition.rotation.score);
+      setRotFilter(s.definition.rotation.filter ?? "");
+      setRotTop(s.definition.rotation.top);
+      setRotEvery(s.definition.rotation.every);
+    }
     setFast(s.definition.fast);
     setSlow(s.definition.slow);
     setEntry(s.definition.entryPeriod);
@@ -404,7 +457,14 @@ export function Studio({
   }
   const config = () => ({
     initialCash: cash,
-    risk,
+    risk: {
+      ...risk,
+      ...Object.fromEntries(
+        Object.entries(advancedRisk as Record<string, string>)
+          .filter(([, v]) => v.trim() !== "")
+          .map(([k, v]) => [k, integerRiskFields.has(k) ? Number(v) : v.trim()]),
+      ),
+    },
     costs,
     ...(rangeFrom ? { from: new Date(rangeFrom).getTime() } : {}),
     ...(rangeTo ? { to: new Date(rangeTo).getTime() } : {}),
@@ -488,8 +548,24 @@ export function Studio({
           >
             <option value="weight">目标权重</option>
             <option value="risk">风险预算</option>
+            <option value="volatility">目标波动率</option>
           </select>
         </label>
+        <details>
+          <summary>ATR / 移动 / 时间止损与波动率仓位</summary>
+          {Object.entries(advancedRiskFields).map(([k, label]) => (
+            <label key={k}>
+              {label}
+              <input
+                value={advancedRisk[k] ?? ""}
+                onChange={(e) =>
+                  setAdvancedRisk({ ...advancedRisk, [k]: e.target.value })
+                }
+                inputMode="decimal"
+              />
+            </label>
+          ))}
+        </details>
         {Object.entries({
           weightPct: "目标权重 %",
           riskPct: "单笔风险 %",
@@ -613,7 +689,7 @@ export function Studio({
                 setTab("backtest");
               }}
             />
-            <ResearchLab rpc={rpc} sessionId={sessionId} />
+            <ResearchLab rpc={rpc} sessionId={sessionId} {...(runId ? { runId } : {})} />
             <details className="advanced-tools">
               <summary>高级研究工具、示例与数据管理</summary>
               <div className="card">
@@ -772,6 +848,46 @@ export function Studio({
                   >
                     <option value="sma_cross">均线交叉</option>
                     <option value="breakout">区间突破</option>
+                    <option value="expr">表达式规则</option>
+                    <option value="rotation">横截面轮动</option>
+                  </select>
+                </label>
+                <label>
+                  从策略库填入
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const c = STRATEGY_CATALOG.find((x) => x.id === e.target.value);
+                      if (!c) return;
+                      setName(c.name);
+                      setTemplate(c.definition.template);
+                      if (c.definition.fast) setFast(c.definition.fast);
+                      if (c.definition.slow) setSlow(c.definition.slow);
+                      setRuleEntry(c.definition.rules?.entry ?? "");
+                      setRuleExit(c.definition.rules?.exit ?? "");
+                      if (c.definition.rotation) {
+                        setRotScore(c.definition.rotation.score);
+                        setRotFilter(c.definition.rotation.filter ?? "");
+                        setRotTop(c.definition.rotation.top);
+                        setRotEvery(c.definition.rotation.every);
+                      }
+                      if (c.risk)
+                        setAdvancedRisk(
+                          Object.fromEntries(
+                            Object.entries(c.risk)
+                              .filter(([k]) => k !== "sizing")
+                              .map(([k, v]) => [k, String(v)]),
+                          ),
+                        );
+                      if (c.risk?.sizing) setRisk({ ...risk, sizing: c.risk.sizing });
+                    }}
+                  >
+                    <option value="">选择…</option>
+                    {STRATEGY_CATALOG.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.family} · {c.name}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <label>
@@ -793,6 +909,71 @@ export function Studio({
                   onChange={(e) => setSymbolText(e.target.value.toUpperCase())}
                 />
               </label>
+              {template === "expr" && (
+                <>
+                  <label>
+                    入场条件
+                    <textarea
+                      aria-label="入场条件表达式"
+                      rows={2}
+                      value={ruleEntry}
+                      placeholder="cross_above(ema(close, 12), ema(close, 26)) and adx(14) > 25"
+                      onChange={(e) => setRuleEntry(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    退出条件
+                    <textarea
+                      aria-label="退出条件表达式"
+                      rows={2}
+                      value={ruleExit}
+                      placeholder="cross_below(ema(close, 12), ema(close, 26))"
+                      onChange={(e) => setRuleExit(e.target.value)}
+                    />
+                  </label>
+                </>
+              )}
+              {template === "rotation" && (
+                <>
+                  <label>
+                    排序得分（从高到低）
+                    <input
+                      value={rotScore}
+                      onChange={(e) => setRotScore(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    持有条件（可空）
+                    <input
+                      value={rotFilter}
+                      placeholder="close > sma(close, 200)"
+                      onChange={(e) => setRotFilter(e.target.value)}
+                    />
+                  </label>
+                  <div className="grid">
+                    <label>
+                      持有数量
+                      <input
+                        type="number"
+                        min={1}
+                        value={rotTop}
+                        onChange={(e) => setRotTop(Number(e.target.value))}
+                      />
+                    </label>
+                    <label>
+                      每隔多少根调仓
+                      <input
+                        type="number"
+                        min={1}
+                        value={rotEvery}
+                        onChange={(e) => setRotEvery(Number(e.target.value))}
+                      />
+                    </label>
+                  </div>
+                </>
+              )}
+              {expressionError && <p role="alert">{expressionError}</p>}
+              {(template === "sma_cross" || template === "breakout") && (
               <div className="grid">
                 {(template === "sma_cross"
                   ? [
@@ -817,6 +998,8 @@ export function Studio({
                   </label>
                 ))}
               </div>
+              )}
+              {(template === "sma_cross" || template === "breakout") && (
               <details>
                 <summary>组合条件与高周期确认</summary>
                 <p>
@@ -864,13 +1047,14 @@ export function Studio({
                 </button>
                 {conditionError && <p role="alert">{conditionError}</p>}
               </details>
+              )}
               <p className="hint">
                 信号仅使用已收盘数据；回测最早下一根开盘成交。突破区间排除当前 K
                 线。参数尚未经过有效性验证。
               </p>
               <button
                 className="primary"
-                disabled={busy || !!conditionError}
+                disabled={busy || !!conditionError || !!expressionError}
                 onClick={() =>
                   void act<StrategyRecord>(
                     "draft",
@@ -886,9 +1070,11 @@ export function Studio({
                         slow,
                         entryPeriod: entry,
                         exitPeriod: exit,
-                        ...(parsedConditions
+                        ...(parsedConditions &&
+                        (template === "sma_cross" || template === "breakout")
                           ? { conditions: parsedConditions }
                           : {}),
+                        ...expressionFields(),
                       },
                     },
                     (s) => {

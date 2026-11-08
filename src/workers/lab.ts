@@ -72,10 +72,16 @@ try {
       const text = read(join(workerData.directory, "datasets", dataset.file));
       if (hash(text) !== dataset.hash)
         fail("HASH_MISMATCH", "数据快照hash不匹配");
-      return validateBars(JSON.parse(text), dataset.symbol, dataset.interval);
+      return validateBars(
+        JSON.parse(text),
+        dataset.symbol,
+        dataset.interval,
+        Date.now(),
+        { allowGaps: true },
+      );
     },
   };
-  const value = labAction(reader, workerData.action, workerData.input);
+  const value = await labAction(reader, workerData.action, workerData.input);
   if (Buffer.byteLength(JSON.stringify(value)) > 32 * 1024 * 1024)
     fail("LAB_RESULT_BUDGET", "研究分析结果超过32 MiB上限，请缩小范围");
   parentPort!.postMessage({ type: "result", value });

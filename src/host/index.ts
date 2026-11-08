@@ -162,6 +162,9 @@ export default class QuantService extends Service {
       case "data-audit":
       case "universe-asof":
       case "simulation-replay":
+      case "parameter-sweep":
+      case "walk-forward":
+      case "performance-report":
         return this.lab.run(r, action, input, signal);
       case "project-create":
         return this.projects.create(input, sessionId);

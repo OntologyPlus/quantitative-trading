@@ -1,0 +1,10 @@
+{
+  "sma-noisy": "60553af664f427aa95e67caf09ba13042f8f7c47f516e3379e469f14ae555495",
+  "sma-synthetic": "d41416836953f473217cecceeaefdc3c9b9098bcffec5d092f43a42ce8477076",
+  "breakout-noisy": "5bc379dc8e78b899b7d90b22d0f0c5edae133afcab2e38a61f12848d6e6abc90",
+  "breakout-risk": "e31bc7a3fbb4e2357b3acbfa4e9cb4fffd34f553baf1c2f9c5a1cfba1296c076",
+  "multi-symbol": "7dff0b033d3a3687dde3876384cb162a434064c212284223f467d47b8a278fbf",
+  "conditions-filter": "ac0d60e361036b7895f60584e70d8d6e7caf0e9ef6418025779d5cc3931e8b99",
+  "conditions-replace": "aaa54c3358cfd5df06850a74980a48d6988f63d963218076276d9c49328f02d0",
+  "tight-limits": "ae31597b48d81fa3c31876f9c8d976da2fb3c8312e698668d8f9f4eb3ee18369"
+}

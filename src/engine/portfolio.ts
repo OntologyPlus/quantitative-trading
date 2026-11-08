@@ -11,6 +11,7 @@ import {
   ingestBatch,
   intent,
   mark,
+  settleCurve,
 } from "./core.js";
 import type { Bar, RunConfig, Strategy } from "../domain/contracts.js";
 export const portfolioBacktestInput = z
@@ -190,6 +191,7 @@ export function portfolioBacktest(
       );
   }
   for (const l of sources) {
+    settleCurve(l.state);
     l.state.pending = {};
     assertLedger(l.state, l.funding.toFixed());
   }

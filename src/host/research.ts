@@ -10,6 +10,7 @@ import {
   parseCSV,
   synthetic,
   validateBars,
+  assertGapPolicy,
   download,
   symbols,
 } from "../adapters/market.js";
@@ -97,7 +98,13 @@ export class Research {
     );
     if (hash(text) !== dataset.hash)
       fail("HASH_MISMATCH", "数据快照 hash 不匹配");
-    return validateBars(JSON.parse(text), dataset.symbol, dataset.interval);
+    return validateBars(
+      JSON.parse(text),
+      dataset.symbol,
+      dataset.interval,
+      Date.now(),
+      { allowGaps: true },
+    );
   }
   saveDataset(
     name: string,
@@ -108,7 +115,8 @@ export class Research {
     syntheticFlag = false,
     rules = DEFAULT_RULES,
   ): Dataset {
-    const bars = validateBars(input, sym, int),
+    const bars = validateBars(input, sym, int, Date.now(), { allowGaps: true }),
+      gaps = assertGapPolicy(bars, int),
       body = JSON.stringify(bars),
       digest = hash(body),
       file = `${digest}.json`,
@@ -130,7 +138,7 @@ export class Research {
       rules,
       ruleAsOf: at(),
       provenance: { version: 1, provider: source, retrievedAt: Date.now() },
-      quality: { gaps: 0, duplicates: 0, valid: true },
+      quality: { gaps: gaps.gaps, duplicates: 0, valid: true },
       synthetic: syntheticFlag,
     };
     this.store.put("dataset", record.id, record);

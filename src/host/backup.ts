@@ -1,6 +1,6 @@
 import { provenanceSchema } from "../domain/provenance.js";
 import { z } from "zod";
-import { hash, validateBars } from "../adapters/market.js";
+import { gapReport, hash, validateBars } from "../adapters/market.js";
 import type {
   Account,
   Dataset,
@@ -163,7 +163,7 @@ export function restoreBackup(r: Research, input: unknown) {
           ruleAsOf: z.string(),
           provenance: provenanceSchema.optional(),
           quality: z.object({
-            gaps: z.literal(0),
+            gaps: z.number().int().nonnegative(),
             duplicates: z.literal(0),
             valid: z.literal(true),
           }),
@@ -549,12 +549,15 @@ export function restoreBackup(r: Research, input: unknown) {
   }
   // Validate everything before any DB mutation. Ready files are content-addressed.
   for (const d of datasets) {
-    const bars = validateBars(b.data[d.id], d.symbol, d.interval),
+    const bars = validateBars(b.data[d.id], d.symbol, d.interval, Date.now(), {
+        allowGaps: true,
+      }),
       text = JSON.stringify(bars);
     if (
       hash(text) !== d.hash ||
       d.file !== `${d.hash}.json` ||
       bars.length !== d.count ||
+      gapReport(bars, d.interval).gaps !== d.quality.gaps ||
       bars[0]!.time !== d.from ||
       bars.at(-1)!.time !== d.to
     )

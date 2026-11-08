@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DslError, parse as parseDsl, type Kind } from "./dsl.js";
 export const id = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/);
 export const decimal = z.string().regex(/^(0|[1-9]\d{0,15})(\.\d{1,16})?$/);
 export const positive = decimal.refine((v) => Number(v) > 0);
@@ -18,9 +19,43 @@ const conditionSchema = z
   })
   .strict()
   .refine((c) => (c.period + 2) * c.factor - 1 <= 2002, "条件预热最多2002根");
+const dslText = (kind: Kind) =>
+  z
+    .string()
+    .min(1)
+    .max(2000)
+    .superRefine((text, ctx) => {
+      try {
+        parseDsl(text, kind);
+      } catch (e) {
+        if (!(e instanceof DslError)) throw e;
+        ctx.addIssue({
+          code: "custom",
+          message: `表达式错误（第 ${e.at + 1} 个字符）：${e.message}`,
+        });
+      }
+    });
 export const strategySchema = z
   .object({
-    template: z.enum(["sma_cross", "breakout"]),
+    template: z.enum(["sma_cross", "breakout", "expr", "rotation"]),
+    rules: z
+      .object({
+        version: z.literal(1),
+        entry: dslText("bool"),
+        exit: dslText("bool"),
+      })
+      .strict()
+      .optional(),
+    rotation: z
+      .object({
+        version: z.literal(1),
+        score: dslText("series"),
+        filter: dslText("bool").optional(),
+        top: z.number().int().min(1).max(10),
+        every: z.number().int().min(1).max(10000),
+      })
+      .strict()
+      .optional(),
     conditions: z
       .object({
         version: z.literal(1),
@@ -42,10 +77,26 @@ export const strategySchema = z
     exitPeriod: z.number().int().min(2).max(1000).default(10),
   })
   .strict()
-  .refine((x) => x.fast < x.slow, { message: "快均线周期必须小于慢均线" });
+  .refine((x) => x.fast < x.slow, { message: "快均线周期必须小于慢均线" })
+  .refine((x) => (x.template === "expr") === !!x.rules, {
+    message: "表达式策略须且仅须提供 rules",
+  })
+  .refine((x) => (x.template === "rotation") === !!x.rotation, {
+    message: "轮动策略须且仅须提供 rotation",
+  })
+  .refine(
+    (x) => !x.conditions || x.template === "sma_cross" || x.template === "breakout",
+    { message: "组合条件只适用于均线/突破模板；表达式策略请直接写入规则" },
+  )
+  .refine(
+    (x) =>
+      x.template !== "rotation" ||
+      (x.symbols.length >= 2 && x.rotation!.top < x.symbols.length),
+    { message: "轮动策略至少两个标的，且持有数须小于标的数" },
+  );
 export const riskSchema = z
   .object({
-    sizing: z.enum(["weight", "risk"]).default("weight"),
+    sizing: z.enum(["weight", "risk", "volatility"]).default("weight"),
     weightPct: pct.default("10"),
     riskPct: pct.default("1"),
     stopLossPct: pct.default("5"),
@@ -55,10 +106,21 @@ export const riskSchema = z
     maxPositions: z.number().int().min(1).max(10).default(3),
     dailyLossPct: pct.default("5"),
     maxDrawdownPct: pct.default("20"),
+    stopAtr: decimal.refine((v) => Number(v) > 0 && Number(v) <= 20).optional(),
+    atrPeriod: z.number().int().min(2).max(200).optional(),
+    trailingStopPct: pct.refine((v) => Number(v) > 0).optional(),
+    trailingAtr: decimal.refine((v) => Number(v) > 0 && Number(v) <= 20).optional(),
+    maxHoldBars: z.number().int().min(1).max(100000).optional(),
+    targetVolPct: pct.refine((v) => Number(v) > 0).optional(),
+    volPeriod: z.number().int().min(5).max(1000).optional(),
   })
   .strict()
-  .refine((x) => x.sizing !== "risk" || Number(x.stopLossPct) > 0, {
-    message: "风险预算模式需要有效止损",
+  .refine(
+    (x) => x.sizing !== "risk" || Number(x.stopLossPct) > 0 || !!x.stopAtr,
+    { message: "风险预算模式需要有效止损（百分比或 ATR）" },
+  )
+  .refine((x) => x.sizing !== "volatility" || !!x.targetVolPct, {
+    message: "波动率仓位需要 targetVolPct",
   });
 export const costsSchema = z
   .object({
@@ -140,11 +202,13 @@ export const stateSchema = z
           cost: internal,
           stop: internal,
           take: internal,
+          openedAt: timestamp.optional(),
+          peak: internal.optional(),
         })
         .strict(),
     ),
     prices: z.record(symbol, positive),
-    history: z.record(symbol, z.array(barSchema).max(2002)),
+    history: z.record(symbol, z.array(barSchema).max(4002)),
     pending: z.record(
       symbol,
       z
@@ -154,6 +218,8 @@ export const stateSchema = z
           side: z.enum(["BUY", "SELL"]),
           signalAt: timestamp,
           reason: z.string().max(100),
+          stopDistance: internal.optional(),
+          weightPct: internal.optional(),
         })
         .strict(),
     ),
@@ -215,5 +281,12 @@ export const stateSchema = z
     sequence: z.number().int().nonnegative(),
     lastTime: z.record(symbol, timestamp),
     stoppedOpening: z.boolean(),
+    idle: z
+      .object({
+        warmup: z.number().int().nonnegative(),
+        noSignal: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();

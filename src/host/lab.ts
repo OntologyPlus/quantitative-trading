@@ -15,6 +15,10 @@ import { hash } from "../adapters/market.js";
 import { backtest, ENGINE_VERSION } from "../engine/backtest.js";
 import { researchQuality } from "../research/quality.js";
 import { portfolioInput, portfolioResearch } from "../research/portfolio.js";
+import { parameterSweep, sweepInput } from "../research/sweep.js";
+import { poolScreener } from "./sweep-pool.js";
+import { walkForward } from "../research/walkforward.js";
+import { performanceInput, performanceReport } from "../research/performance.js";
 export interface LabReader {
   store: {
     assertLease(): void;
@@ -72,6 +76,36 @@ export function labAction(r: LabReader, action: string, input: unknown) {
     if (legs.reduce((n, l) => n + l.bars.length, 0) > 1000000)
       fail("TOO_LARGE", "组合最多一百万根");
     return portfolioBacktest(x, legs);
+  }
+  if (action === "walk-forward" || action === "performance-report") {
+    const runId = z.object({ runId: id }).passthrough().parse(input).runId,
+      run = r.store.get<RunRecord>("run", runId);
+    if (run.config.engineVersion !== ENGINE_VERSION)
+      fail("LAB_SOURCE", "须基于当前引擎的回测");
+    const datasets = run.datasetIds.map((id) => r.store.get<Dataset>("dataset", id));
+    if (datasets.reduce((n, d) => n + d.count, 0) > 1000000)
+      fail("TOO_LARGE", "最多一百万根");
+    const strategy = r.store.get<StrategyRecord>("strategy", run.strategyId).definition,
+      bars = datasets.flatMap((d) => r.bars(d));
+    return action === "walk-forward"
+      ? walkForward(run, strategy, bars, input, poolScreener())
+      : performanceReport(run, strategy, bars, performanceInput.parse(input));
+  }
+  if (action === "parameter-sweep") {
+    const x = sweepInput.parse(input),
+      run = r.store.get<RunRecord>("run", x.runId);
+    if (run.config.engineVersion !== ENGINE_VERSION)
+      fail("SWEEP_SOURCE", "参数扫描须基于当前引擎的回测");
+    const datasets = run.datasetIds.map((id) => r.store.get<Dataset>("dataset", id));
+    if (datasets.reduce((n, d) => n + d.count, 0) > 1000000)
+      fail("TOO_LARGE", "参数扫描最多一百万根");
+    return parameterSweep(
+      run,
+      r.store.get<StrategyRecord>("strategy", run.strategyId).definition,
+      datasets.flatMap((d) => r.bars(d)),
+      x,
+      poolScreener(),
+    );
   }
   if (action === "portfolio-research") {
     const x = portfolioInput.parse(input);

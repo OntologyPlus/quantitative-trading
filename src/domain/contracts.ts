@@ -14,9 +14,27 @@ export interface Bar {
   close: string;
   volume: string;
 }
+export interface ExprRules {
+  version: 1;
+  /** Boolean expression; see domain/dsl.ts. */
+  entry: string;
+  exit: string;
+}
+export interface RotationRules {
+  version: 1;
+  /** Series expression ranked high-to-low across symbols. */
+  score: string;
+  /** Optional boolean expression a symbol must satisfy to be held. */
+  filter?: string | undefined;
+  top: number;
+  /** Rebalance when floor(barOpenTime / interval) is a multiple of `every`. */
+  every: number;
+}
 export interface Strategy {
-  template: "sma_cross" | "breakout";
+  template: "sma_cross" | "breakout" | "expr" | "rotation";
   conditions?: import("./conditions.js").Conditions | undefined;
+  rules?: ExprRules | undefined;
+  rotation?: RotationRules | undefined;
   symbols: string[];
   interval: Interval;
   fast: number;
@@ -25,7 +43,7 @@ export interface Strategy {
   exitPeriod: number;
 }
 export interface Risk {
-  sizing: "weight" | "risk";
+  sizing: "weight" | "risk" | "volatility";
   weightPct: string;
   riskPct: string;
   stopLossPct: string;
@@ -35,6 +53,18 @@ export interface Risk {
   maxPositions: number;
   dailyLossPct: string;
   maxDrawdownPct: string;
+  /** Stop at entry − stopAtr × ATR(atrPeriod) instead of stopLossPct. */
+  stopAtr?: string | undefined;
+  atrPeriod?: number | undefined;
+  /** Ratchet the stop to high × (1 − pct) after each closed bar. */
+  trailingStopPct?: string | undefined;
+  /** Chandelier: highest high since entry − trailingAtr × ATR(atrPeriod). */
+  trailingAtr?: string | undefined;
+  /** Exit at the next open after holding this many bars. */
+  maxHoldBars?: number | undefined;
+  /** Volatility sizing: annualised target volatility in percent. */
+  targetVolPct?: string | undefined;
+  volPeriod?: number | undefined;
 }
 export interface Costs {
   feeBps: string;
@@ -73,6 +103,10 @@ export interface Position {
   cost: string;
   stop: string;
   take: string;
+  /** Fill time; present for positions opened by engine ≥ 0.3. */
+  openedAt?: number | undefined;
+  /** Highest high since entry, for ATR trailing stops. */
+  peak?: string | undefined;
 }
 export interface Intent {
   id: string;
@@ -80,6 +114,10 @@ export interface Intent {
   side: "BUY" | "SELL";
   signalAt: number;
   reason: string;
+  /** Absolute stop distance in quote currency (ATR stops). */
+  stopDistance?: string | undefined;
+  /** Position weight override in percent (volatility sizing). */
+  weightPct?: string | undefined;
 }
 export interface Fill {
   id: string;
@@ -133,6 +171,8 @@ export interface EngineState {
   sequence: number;
   lastTime: Record<string, number>;
   stoppedOpening: boolean;
+  /** Idle bars counted instead of logged (backtests only). */
+  idle?: { warmup: number; noSignal: number } | undefined;
 }
 export interface Metrics {
   returnPct: string;

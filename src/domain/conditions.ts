@@ -1,5 +1,6 @@
 import { Decimal } from "decimal.js";
-import type { Bar, Strategy } from "./contracts.js";
+import type { Bar, Risk, Strategy } from "./contracts.js";
+import { compile, lookback } from "./dsl.js";
 
 export interface Condition {
   indicator: "close_sma" | "volume_ratio" | "return_pct";
@@ -14,8 +15,26 @@ export interface Conditions {
   entry: Condition[];
   exit: Condition[];
 }
-export function historyRequired(s: Strategy) {
+/** Bars of history the risk options need (ATR stops, volatility sizing). */
+export function riskHistory(r?: Partial<Risk>) {
+  if (!r) return 0;
+  const atr = r.stopAtr || r.trailingAtr ? 4 * (r.atrPeriod ?? 14) + 1 : 0,
+    vol = r.sizing === "volatility" ? (r.volPeriod ?? 20) + 1 : 0;
+  return Math.max(atr, vol);
+}
+export function historyRequired(s: Strategy, risk?: Partial<Risk>) {
+  if (s.template === "expr" || s.template === "rotation") {
+    const exprs =
+      s.template === "expr"
+        ? [compile(s.rules!.entry, "bool"), compile(s.rules!.exit, "bool")]
+        : [
+            compile(s.rotation!.score, "series"),
+            ...(s.rotation!.filter ? [compile(s.rotation!.filter, "bool")] : []),
+          ];
+    return Math.max(2, riskHistory(risk), ...exprs.map((e) => lookback(e) + 1));
+  }
   return Math.max(
+    riskHistory(risk),
     s.slow + 1,
     s.entryPeriod + 1,
     s.exitPeriod + 1,

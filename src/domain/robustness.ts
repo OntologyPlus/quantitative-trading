@@ -1,4 +1,11 @@
+import { parse as parseDsl, print as printDsl, scalePeriods } from "./dsl.js";
 import { z } from "zod";
+/** 32-bit FNV-1a, enough to tell expression variants apart in a key. */
+const fnv1a = (text: string) => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(16).padStart(8, "0");
+};
 import { Decimal } from "decimal.js";
 import { INTERVAL_MS, type Strategy } from "./contracts.js";
 import { id, strategySchema } from "./schemas.js";
@@ -85,6 +92,38 @@ export function parameterNeighbors(
         },
       }));
   }
+  if (strategy.template === "expr" || strategy.template === "rotation") {
+    // Shift every indicator period in the expressions by ±shiftPct.
+    const scale = (f: number) => (text: string, kind: "bool" | "series") =>
+      printDsl(scalePeriods(parseDsl(text, kind), f));
+    return [1 - shiftPct / 100, 1 + shiftPct / 100]
+      .map((f) =>
+        strategy.template === "expr"
+          ? {
+              ...strategy,
+              rules: {
+                ...strategy.rules!,
+                entry: scale(f)(strategy.rules!.entry, "bool"),
+                exit: scale(f)(strategy.rules!.exit, "bool"),
+              },
+            }
+          : {
+              ...strategy,
+              rotation: {
+                ...strategy.rotation!,
+                score: scale(f)(strategy.rotation!.score, "series"),
+                ...(strategy.rotation!.filter
+                  ? { filter: scale(f)(strategy.rotation!.filter, "bool") }
+                  : {}),
+              },
+            },
+      )
+      .filter(
+        (x, i, all) =>
+          JSON.stringify(x) !== JSON.stringify(strategy) &&
+          all.findIndex((y) => JSON.stringify(y) === JSON.stringify(x)) === i,
+      );
+  }
   const key = strategy.template === "sma_cross" ? "slow" : "entryPeriod";
   const lower = key === "slow" ? strategy.fast + 1 : 2;
   const upper = key === "slow" ? 2000 : 1000;
@@ -145,7 +184,9 @@ export function diagnosticPlan(
         key:
           definition.conditions && r.parameterVersion === 2
             ? `parameter:conditions:entry:0:period:${definition.conditions.entry[0]!.period}`
-            : `parameter:${definition.slow}:${definition.entryPeriod}`,
+            : definition.rules || definition.rotation
+              ? `parameter:${definition.template}:${fnv1a(JSON.stringify(definition.rules ?? definition.rotation))}`
+              : `parameter:${definition.slow}:${definition.entryPeriod}`,
         definition,
         baseDefinition: selected,
       },

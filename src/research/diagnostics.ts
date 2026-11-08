@@ -172,7 +172,11 @@ export function buildDiagnostics(
                   ? `conditions.entry[0].period=${definition.conditions.entry[0]!.period}（${definition.conditions.entry[0]!.indicator}，factor=${definition.conditions.entry[0]!.factor}）`
                   : definition.template === "sma_cross"
                     ? `slow=${definition.slow}`
-                    : `entryPeriod=${definition.entryPeriod}`,
+                    : definition.template === "expr"
+                      ? `entry=${definition.rules!.entry}`
+                      : definition.template === "rotation"
+                        ? `score=${definition.rotation!.score}`
+                        : `entryPeriod=${definition.entryPeriod}`,
             }
           : {}),
         returnPct: m.returnPct,

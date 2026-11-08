@@ -96,6 +96,8 @@ export class Paper {
         fail("INVALID_STATE", "当前状态不能启动");
       const strategy = this.store.get<StrategyRecord>("strategy", a.strategyId),
         controller = new AbortController();
+      if (strategy.definition.template === "rotation")
+        fail("PAPER_UNSUPPORTED", "轮动策略需要同步的多标的行情，模拟盘暂不支持");
       if (strategy.approvedConfigHash) {
         const input = {
           initialCash: a.config.initialCash,
@@ -118,7 +120,7 @@ export class Paper {
       const list = await this.market.symbols(controller.signal),
         step = INTERVAL_MS[strategy.definition.interval],
         to = Math.floor(Date.now() / step) * step - step,
-        n = historyRequired(strategy.definition) + 3;
+        n = historyRequired(strategy.definition, a.config.risk) + 3;
       const history: Record<string, Bar[]> = {};
       const rules = { ...a.config.rules };
       for (const sym of strategy.definition.symbols) {
@@ -136,7 +138,7 @@ export class Paper {
           history[sym],
           sym,
           strategy.definition.interval,
-        ).slice(-historyRequired(strategy.definition));
+        ).slice(-historyRequired(strategy.definition, a.config.risk));
       }
       const value = this.store.submit(
         x.submissionId,
